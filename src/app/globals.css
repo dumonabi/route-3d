@@ -13,13 +13,7 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
-gmp-map-3d {
-  touch-action: none;
-}
-
 .map-3d-host {
-  transform: translateZ(0);
-  will-change: transform;
   -webkit-user-select: none;
   user-select: none;
 }
