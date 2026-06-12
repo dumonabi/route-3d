@@ -1,9 +1,12 @@
 import type { Route } from "@/lib/route-types";
 
+const MAPS_VERSION = "alpha";
+
 declare global {
   interface Window {
     __mapsReady?: Promise<void>;
     __mapSceneReady?: Promise<void>;
+    __mapsVersion?: string;
   }
 }
 
@@ -21,50 +24,88 @@ export function enableMap3DShadowAccess() {
   };
 }
 
-const MOVE_LABEL =
-  /move|pan|north|south|east|west|up|down|left|right|arrow/i;
+const KEEP_CONTROL_LABEL =
+  /tilt|incline|inclin|rotate|rotation|girar|heading|compass|brújula|brujula|orbit/i;
 
-function isMoveControlGroup(el: Element): boolean {
-  const buttons = [...el.querySelectorAll(":scope > button")];
-  if (buttons.length !== 4) return false;
-  const labels = buttons.map(
-    (btn) =>
-      btn.getAttribute("aria-label") ??
-      btn.getAttribute("title") ??
-      btn.textContent ??
-      "",
-  );
-  return labels.filter((label) => MOVE_LABEL.test(label)).length >= 2;
+const HIDE_CONTROL_LABEL =
+  /zoom|acercar|alejar|range|magnify|ampliar|reducir|plus|minus|\+|\-|move\s+(the\s+)?map|pan\s+(the\s+)?map|mover\s+(el\s+)?mapa|desplaz/i;
+
+const HIDE_DIRECTION_LABEL =
+  /north|south|east|west|left|right|up|down|izquierda|derecha|arriba|abajo/i;
+
+function controlLabel(btn: Element): string {
+  return (
+    btn.getAttribute("aria-label") ??
+    btn.getAttribute("title") ??
+    btn.textContent ??
+    ""
+  ).trim();
 }
 
-export function hideMoveControls(map: HTMLElement): void {
+function shouldHideControl(label: string): boolean {
+  if (!label) return false;
+  if (KEEP_CONTROL_LABEL.test(label)) return false;
+  if (HIDE_CONTROL_LABEL.test(label)) return true;
+  if (
+    /^(move|pan|mover|desplazar)/i.test(label) &&
+    HIDE_DIRECTION_LABEL.test(label)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/** Hide zoom and pan buttons; keep tilt and rotate controls. */
+export function hideMapControls(map: HTMLElement): void {
   const root = map.shadowRoot;
   if (!root) return;
-  for (const el of root.querySelectorAll("*")) {
-    if (isMoveControlGroup(el)) {
-      (el as HTMLElement).style.display = "none";
-      return;
+
+  for (const btn of root.querySelectorAll<HTMLElement>(
+    "button, [role='button']",
+  )) {
+    if (shouldHideControl(controlLabel(btn))) {
+      btn.style.display = "none";
     }
+  }
+
+  // Collapse empty wrappers left after hiding pan/zoom groups.
+  for (const el of root.querySelectorAll<HTMLElement>("*")) {
+    const buttons = [...el.querySelectorAll(":scope > button")];
+    if (buttons.length < 2) continue;
+    const anyVisible = buttons.some(
+      (btn) => getComputedStyle(btn).display !== "none",
+    );
+    if (!anyVisible) el.style.display = "none";
   }
 }
 
 export function watchMoveControls(map: HTMLElement): () => void {
   enableMap3DShadowAccess();
-  let runs = 0;
-  const run = () => {
-    if (runs++ > 6) return;
-    hideMoveControls(map);
+  let observer: MutationObserver | null = null;
+
+  const run = () => hideMapControls(map);
+
+  const attach = () => {
+    run();
+    const root = map.shadowRoot;
+    if (!root) return;
+    observer?.disconnect();
+    observer = new MutationObserver(run);
+    observer.observe(root, { childList: true, subtree: true });
   };
 
-  run();
-  map.addEventListener("gmp-steadychange", run);
-  const t1 = window.setTimeout(run, 400);
-  const t2 = window.setTimeout(run, 1500);
+  attach();
+  map.addEventListener("gmp-steadychange", attach);
+  const t1 = window.setTimeout(attach, 400);
+  const t2 = window.setTimeout(attach, 1500);
+  const t3 = window.setTimeout(attach, 3500);
 
   return () => {
+    observer?.disconnect();
+    map.removeEventListener("gmp-steadychange", attach);
     window.clearTimeout(t1);
     window.clearTimeout(t2);
-    map.removeEventListener("gmp-steadychange", run);
+    window.clearTimeout(t3);
   };
 }
 
@@ -72,10 +113,15 @@ export function loadMaps(key: string): Promise<void> {
   if (typeof window === "undefined") {
     return Promise.reject(new Error("Maps only runs in the browser"));
   }
-  if (window.__mapsReady) return window.__mapsReady;
+  if (window.__mapsReady && window.__mapsVersion === MAPS_VERSION) {
+    return window.__mapsReady;
+  }
+
+  window.__mapsVersion = MAPS_VERSION;
+  window.__mapSceneReady = undefined;
 
   window.__mapsReady = new Promise((resolve, reject) => {
-    const g = { key, v: "alpha" };
+    const g = { key, v: MAPS_VERSION };
     const w = window as Window & { google?: { maps?: Record<string, unknown> } };
     w.google = w.google ?? {};
     w.google.maps = w.google.maps ?? {};

@@ -526,7 +526,7 @@ function FormScreen({
 }) {
   const canSubmit = isPlaceSelected(origin) && isPlaceSelected(destination);
   return (
-    <div className="flex min-h-dvh flex-col px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-[max(1.5rem,env(safe-area-inset-top))]">
+    <div className="google-banner-reserve-top flex min-h-dvh flex-col px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))]">
       <header className="mb-8">
         <h1 className="text-3xl font-semibold tracking-tight text-white">
           Route 3D
@@ -633,7 +633,7 @@ function MapScreen({
         </div>
       )}
 
-      <div className="pointer-events-none absolute inset-x-0 top-0 z-10 p-3 pt-[max(0.75rem,env(safe-area-inset-top))]">
+      <div className="google-banner-reserve-top pointer-events-none absolute inset-x-0 top-0 z-10 p-3">
         <div className="pointer-events-auto flex items-start gap-2">
           <button
             type="button"

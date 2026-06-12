@@ -23,3 +23,20 @@ gmp-map-3d {
   -webkit-user-select: none;
   user-select: none;
 }
+
+/* Fixed gap for Google's alpha dev banner (does not collapse when dismissed). */
+:root {
+  --google-banner-reserve: 5.25rem;
+}
+
+@media (min-width: 768px) {
+  :root {
+    --google-banner-reserve: 3.5rem;
+  }
+}
+
+.google-banner-reserve-top {
+  padding-top: calc(
+    var(--google-banner-reserve) + env(safe-area-inset-top, 0px)
+  );
+}
