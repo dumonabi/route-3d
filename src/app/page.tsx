@@ -58,17 +58,9 @@ const MODES: { value: Mode; label: string }[] = [
   { value: "TRANSIT", label: "Transit" },
 ];
 
-const DEFAULT_ORIGIN: Place = {
-  label: "Madrid Atocha",
-  lat: 40.406,
-  lng: -3.689,
-};
-
-const DEFAULT_DESTINATION: Place = {
-  label: "Barcelona Sants",
-  lat: 41.379,
-  lng: 2.14,
-};
+function isPlaceSelected(place: Place | null): place is Place {
+  return place !== null;
+}
 
 function toTravelMode(mode: Mode): google.maps.TravelMode {
   if (mode === "WALKING") return google.maps.TravelMode.WALKING;
@@ -86,12 +78,14 @@ function PlaceField({
   label,
   value,
   onSelect,
+  onClear,
   allowCurrentLocation = false,
 }: {
   apiKey: string;
   label: string;
   value: string;
   onSelect: (place: Place) => void;
+  onClear: () => void;
   allowCurrentLocation?: boolean;
 }) {
   const [text, setText] = useState(value);
@@ -294,6 +288,7 @@ function PlaceField({
           onChange={(event) => {
             const next = event.target.value;
             setText(next);
+            if (next.trim() === "") onClear();
             fetchSuggestions(next);
           }}
           onFocus={() => {
@@ -510,21 +505,26 @@ function FormScreen({
   northUp,
   onOrigin,
   onDestination,
+  onOriginClear,
+  onDestinationClear,
   onMode,
   onNorthUp,
   onSubmit,
 }: {
   apiKey: string;
-  origin: Place;
-  destination: Place;
+  origin: Place | null;
+  destination: Place | null;
   mode: Mode;
   northUp: boolean;
   onOrigin: (p: Place) => void;
   onDestination: (p: Place) => void;
+  onOriginClear: () => void;
+  onDestinationClear: () => void;
   onMode: (m: Mode) => void;
   onNorthUp: (v: boolean) => void;
   onSubmit: () => void;
 }) {
+  const canSubmit = isPlaceSelected(origin) && isPlaceSelected(destination);
   return (
     <div className="flex min-h-dvh flex-col px-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] pt-[max(1.5rem,env(safe-area-inset-top))]">
       <header className="mb-8">
@@ -540,15 +540,17 @@ function FormScreen({
         <PlaceField
           apiKey={apiKey}
           label="Origin"
-          value={origin.label}
+          value={origin?.label ?? ""}
           onSelect={onOrigin}
+          onClear={onOriginClear}
           allowCurrentLocation
         />
         <PlaceField
           apiKey={apiKey}
           label="Destination"
-          value={destination.label}
+          value={destination?.label ?? ""}
           onSelect={onDestination}
+          onClear={onDestinationClear}
         />
 
         <div className="grid gap-2">
@@ -586,7 +588,8 @@ function FormScreen({
       <button
         type="button"
         onClick={onSubmit}
-        className="mt-6 min-h-14 w-full rounded-2xl bg-sky-600 text-base font-semibold text-white transition active:scale-[0.98] active:bg-sky-500"
+        disabled={!canSubmit}
+        className="mt-6 min-h-14 w-full rounded-2xl bg-sky-600 text-base font-semibold text-white transition active:scale-[0.98] active:bg-sky-500 disabled:cursor-not-allowed disabled:opacity-40"
       >
         View route in 3D
       </button>
@@ -715,8 +718,8 @@ function MapScreen({
 export default function Page() {
   const apiKey = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
   const [screen, setScreen] = useState<Screen>("form");
-  const [origin, setOrigin] = useState(DEFAULT_ORIGIN);
-  const [destination, setDestination] = useState(DEFAULT_DESTINATION);
+  const [origin, setOrigin] = useState<Place | null>(null);
+  const [destination, setDestination] = useState<Place | null>(null);
   const [mode, setMode] = useState<Mode>("DRIVING");
   const [northUp, setNorthUp] = useState(true);
   const [route, setRoute] = useState<Route | null>(null);
@@ -727,6 +730,7 @@ export default function Page() {
   }, [apiKey]);
 
   const openMap = useCallback(() => {
+    if (!isPlaceSelected(origin) || !isPlaceSelected(destination)) return;
     void preloadMapScene(apiKey);
     setRoute({ origin, destination, mode });
     setMapMounted(true);
@@ -763,6 +767,8 @@ export default function Page() {
           northUp={northUp}
           onOrigin={setOrigin}
           onDestination={setDestination}
+          onOriginClear={() => setOrigin(null)}
+          onDestinationClear={() => setDestination(null)}
           onMode={setMode}
           onNorthUp={setNorthUp}
           onSubmit={openMap}
