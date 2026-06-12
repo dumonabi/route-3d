@@ -581,7 +581,7 @@ function CameraPills({
           type="button"
           className={btn}
           aria-label="Inclinar adelante"
-          onClick={() => adjustTilt(10)}
+          onClick={() => adjustTilt(-10)}
         >
           <TiltForwardIcon />
         </button>
@@ -589,7 +589,7 @@ function CameraPills({
           type="button"
           className={btn}
           aria-label="Inclinar atrás"
-          onClick={() => adjustTilt(-10)}
+          onClick={() => adjustTilt(10)}
         >
           <TiltBackIcon />
         </button>
