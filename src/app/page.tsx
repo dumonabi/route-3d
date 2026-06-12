@@ -454,7 +454,7 @@ function CompassNeedle({ heading }: { heading: number }) {
   return (
     <svg
       viewBox="0 0 32 32"
-      className="h-8 w-8"
+      className="h-9 w-9"
       style={{ transform: `rotate(${-heading}deg)` }}
       aria-hidden
     >
@@ -473,30 +473,6 @@ function CompassNeedle({ heading }: { heading: number }) {
         strokeLinejoin="round"
       />
       <circle cx="16" cy="16" r="2.8" fill="#37474f" />
-    </svg>
-  );
-}
-
-function RotateLeftIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-7 w-7 text-white" aria-hidden>
-      <path
-        d="M16.8 8.2 A7.2 7.2 0 1 0 8.2 17.2"
-        {...iconStroke}
-      />
-      <path d="M16.8 4.8 L16.8 8.2 L13.4 8.2" {...iconStroke} />
-    </svg>
-  );
-}
-
-function RotateRightIcon() {
-  return (
-    <svg viewBox="0 0 24 24" className="h-7 w-7 text-white" aria-hidden>
-      <path
-        d="M7.2 8.2 A7.2 7.2 0 1 1 15.8 17.2"
-        {...iconStroke}
-      />
-      <path d="M7.2 4.8 L7.2 8.2 L10.6 8.2" {...iconStroke} />
     </svg>
   );
 }
@@ -571,13 +547,6 @@ function CameraPills({
     };
   }, [mapRef]);
 
-  const adjustHeading = (delta: number) => {
-    const map = mapRef.current;
-    if (!map) return;
-    const current = map.heading ?? 0;
-    map.heading = ((current + delta) % 360 + 360) % 360;
-  };
-
   const resetNorth = () => {
     const map = mapRef.current;
     if (!map) return;
@@ -601,30 +570,12 @@ function CameraPills({
     <div className="pointer-events-none absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 z-10 flex flex-col items-end gap-2">
       <button
         type="button"
-        className="pointer-events-auto flex h-10 w-10 items-center justify-center rounded-full border border-white/25 bg-black/75 shadow-lg backdrop-blur-md active:bg-black/90"
+        className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full border border-white/25 bg-black/75 shadow-lg backdrop-blur-md active:bg-black/90"
         aria-label="Orientar al norte"
         onClick={resetNorth}
       >
         <CompassNeedle heading={heading} />
       </button>
-      <div className={pill}>
-        <button
-          type="button"
-          className={btn}
-          aria-label="Girar izquierda"
-          onClick={() => adjustHeading(-15)}
-        >
-          <RotateLeftIcon />
-        </button>
-        <button
-          type="button"
-          className={btn}
-          aria-label="Girar derecha"
-          onClick={() => adjustHeading(15)}
-        >
-          <RotateRightIcon />
-        </button>
-      </div>
       <div className={pill}>
         <button
           type="button"
