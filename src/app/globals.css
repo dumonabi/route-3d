@@ -1,0 +1,25 @@
+@import "tailwindcss";
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: system-ui, -apple-system, sans-serif;
+  background: #0b1220;
+  color: #e2e8f0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+gmp-map-3d {
+  touch-action: none;
+}
+
+.map-3d-host {
+  transform: translateZ(0);
+  will-change: transform;
+  -webkit-user-select: none;
+  user-select: none;
+}
