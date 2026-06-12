@@ -69,10 +69,6 @@ function toTravelMode(mode: Mode): google.maps.TravelMode {
   return google.maps.TravelMode.DRIVING;
 }
 
-function modeLabel(mode: Mode): string {
-  return MODES.find((m) => m.value === mode)?.label ?? mode;
-}
-
 function PlaceField({
   apiKey,
   label,
@@ -614,8 +610,6 @@ function MapScreen({
     error: null,
     info: null,
   });
-  const [panelOpen, setPanelOpen] = useState(true);
-
   return (
     <div className="relative h-dvh w-full bg-slate-950">
       <Map3D
@@ -634,70 +628,21 @@ function MapScreen({
       )}
 
       <div className="google-banner-reserve-top pointer-events-none absolute inset-x-0 top-0 z-10 p-3">
-        <div className="pointer-events-auto flex items-start gap-2">
-          <button
-            type="button"
-            onClick={onBack}
-            aria-label="Volver"
-            className="flex min-h-11 min-w-11 shrink-0 items-center justify-center rounded-full border border-white/20 bg-black/55 text-lg text-white backdrop-blur-md active:bg-black/75"
-          >
-            ←
-          </button>
-
-          {panelOpen ? (
-            <div className="min-w-0 flex-1 rounded-2xl border border-white/15 bg-black/55 backdrop-blur-md">
-              <button
-                type="button"
-                onClick={() => setPanelOpen(false)}
-                className="w-full px-4 py-3 text-left"
-              >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium text-white">
-                      {route.origin.label}
-                    </p>
-                    <p className="truncate text-sm text-slate-300">
-                      → {route.destination.label}
-                    </p>
-                  </div>
-                  <span className="shrink-0 text-xs text-slate-400">▲</span>
-                </div>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                  <span className="rounded-full bg-white/10 px-2 py-1 text-slate-200">
-                    {modeLabel(route.mode)}
-                  </span>
-                  {status.loading && status.phase === "route" && (
-                    <span className="rounded-full bg-white/10 px-2 py-1 text-slate-300">
-                      Calculando ruta...
-                    </span>
-                  )}
-                  {status.info && (
-                    <span className="rounded-full bg-sky-500/20 px-2 py-1 text-sky-200">
-                      {status.info.distance} · {status.info.duration}
-                    </span>
-                  )}
-                </div>
-              </button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setPanelOpen(true)}
-              className="min-h-11 flex-1 truncate rounded-full border border-white/15 bg-black/55 px-4 text-left text-sm text-white backdrop-blur-md"
-            >
-              {status.info
-                ? `${status.info.distance} · ${status.info.duration}`
-                : "Ver ruta"}
-            </button>
-          )}
-        </div>
-
-        {status.error && (
-          <p className="pointer-events-auto mt-2 rounded-xl border border-red-400/30 bg-red-950/80 px-4 py-2 text-sm text-red-200 backdrop-blur-md">
-            {status.error}
-          </p>
-        )}
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Atrás"
+          className="pointer-events-auto flex min-h-11 min-w-11 items-center justify-center rounded-full border border-white/20 bg-black/55 text-lg text-white backdrop-blur-md active:bg-black/75"
+        >
+          ←
+        </button>
       </div>
+
+      {status.error && (
+        <p className="pointer-events-none absolute inset-x-3 bottom-[calc(max(0.75rem,env(safe-area-inset-bottom))+3.25rem)] z-10 rounded-xl border border-red-400/30 bg-red-950/80 px-4 py-2 text-center text-sm text-red-200 backdrop-blur-md">
+          {status.error}
+        </p>
+      )}
 
       <a
         href={buildMapsUrl(route)}
