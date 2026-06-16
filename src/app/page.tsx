@@ -15,32 +15,37 @@ import {
   preloadMapScene,
   routeCenter,
 } from "@/lib/maps";
+import type { PathPoint } from "@/lib/route-geo";
+import {
+  clampDeltaMs,
+  hasMovedMeters,
+  smoothPoint,
+} from "@/lib/smooth-motion";
+import {
+  LocationTracker,
+  peekLastKnownLocation,
+  rememberLocationPoint,
+  type LocationSample,
+} from "@/lib/location-tracker";
+import { RouteNavigation } from "@/lib/route-navigation";
+import {
+  renderRouteOnMap,
+  type RouteData,
+  type RouteRenderHandle,
+} from "@/lib/route-service";
+import {
+  createUserLocationIndicator,
+  type UserLocationIndicator,
+} from "@/lib/user-location-indicator";
 import type {
   MapStatus,
   Mode,
+  NavigationGuidance,
   Place,
   Route,
-  RouteInfo,
 } from "@/lib/route-types";
 
 type Screen = "form" | "map";
-
-function formatRouteInfo(route: google.maps.routes.Route): RouteInfo {
-  const localized = route.localizedValues;
-  if (localized?.distance && localized?.duration) {
-    return {
-      distance: localized.distance,
-      duration: localized.duration,
-    };
-  }
-  const distance = route.distanceMeters
-    ? `${Math.round(route.distanceMeters / 1000)} km`
-    : "—";
-  const duration = route.durationMillis
-    ? `${Math.round(route.durationMillis / 60_000)} min`
-    : "—";
-  return { distance, duration };
-}
 
 function routeKey(route: Route): string {
   return `${route.origin.lat},${route.origin.lng}|${route.destination.lat},${route.destination.lng}|${route.mode}`;
@@ -162,12 +167,7 @@ function isPlaceSelected(place: Place | null): place is Place {
   return place !== null;
 }
 
-function toTravelMode(mode: Mode): google.maps.TravelMode {
-  if (mode === "WALKING") return google.maps.TravelMode.WALKING;
-  if (mode === "BICYCLING") return google.maps.TravelMode.BICYCLING;
-  if (mode === "TRANSIT") return google.maps.TravelMode.TRANSIT;
-  return google.maps.TravelMode.DRIVING;
-}
+const CURRENT_LOCATION_LABEL = "Mi ubicación actual";
 
 function PlaceField({
   apiKey,
@@ -205,61 +205,55 @@ function PlaceField({
   const readyLocationRef = useRef<{ lat: number; lng: number } | null>(null);
 
   useEffect(() => {
-    setText(value);
+    if (value) setText(value);
   }, [value]);
 
   useEffect(() => {
     if (
       !allowCurrentLocation ||
       typeof navigator === "undefined" ||
-      !("geolocation" in navigator) ||
-      !navigator.permissions?.query
+      !("geolocation" in navigator)
     ) {
       return;
     }
 
     let dead = false;
-    let permission: PermissionStatus | null = null;
-
-    const clearLocation = () => {
-      readyLocationRef.current = null;
-      if (!dead) setReadyLocation(null);
-    };
 
     const cacheLocation = (coords: GeolocationCoordinates) => {
       const next = { lat: coords.latitude, lng: coords.longitude };
       readyLocationRef.current = next;
+      rememberLocationPoint(next);
       if (!dead) setReadyLocation(next);
     };
 
-    const readGrantedLocation = () => {
+    const tryReadLocation = () => {
       navigator.geolocation.getCurrentPosition(
         (position) => cacheLocation(position.coords),
-        clearLocation,
-        { maximumAge: 300_000, timeout: 8000, enableHighAccuracy: false },
+        () => {
+          // Retry with cached positions allowed (laptops often lack GPS).
+        },
+        { maximumAge: 300_000, timeout: 15_000, enableHighAccuracy: false },
       );
     };
 
-    const syncPermission = () => {
-      if (permission?.state === "granted") readGrantedLocation();
-      else clearLocation();
-    };
+    tryReadLocation();
 
-    navigator.permissions
-      .query({ name: "geolocation" })
-      .then((status) => {
-        if (dead) return;
-        permission = status;
-        syncPermission();
-        status.addEventListener("change", syncPermission);
-      })
-      .catch(() => {
-        // Unsupported: do not show the option (would require a permission prompt).
-      });
+    if (navigator.permissions?.query) {
+      navigator.permissions
+        .query({ name: "geolocation" as PermissionName })
+        .then((status) => {
+          if (dead) return;
+          const sync = () => {
+            if (status.state === "granted") tryReadLocation();
+          };
+          sync();
+          status.addEventListener("change", sync);
+        })
+        .catch(() => undefined);
+    }
 
     return () => {
       dead = true;
-      permission?.removeEventListener("change", syncPermission);
     };
   }, [allowCurrentLocation]);
 
@@ -278,7 +272,7 @@ function PlaceField({
 
     if (input.trim().length < 2) {
       setSuggestions([]);
-      setOpen(readyLocationRef.current !== null);
+      setOpen(allowCurrentLocation || readyLocationRef.current !== null);
       setLoading(false);
       return;
     }
@@ -313,32 +307,86 @@ function PlaceField({
     }, 250);
   };
 
-  const pickCurrentLocation = () => {
-    const cached = readyLocationRef.current;
-    if (!cached) return;
+  const applyCurrentLocation = (lat: number, lng: number) => {
+    const selected: Place = {
+      label: CURRENT_LOCATION_LABEL,
+      lat,
+      lng,
+      isCurrentLocation: true,
+    };
+    setText(CURRENT_LOCATION_LABEL);
+    onSelect(selected);
+  };
 
+  const pickCurrentLocation = () => {
     setOpen(false);
     setLoading(true);
+    setText("Obteniendo ubicación...");
 
-    void (async () => {
-      const { lat, lng } = cached;
-      let placeLabel = "Mi ubicación";
-
-      try {
-        await loadMaps(apiKey);
-        const { Geocoder } = await google.maps.importLibrary("geocoding");
-        const geocoder = new Geocoder();
-        const { results } = await geocoder.geocode({ location: { lat, lng } });
-        placeLabel = results[0]?.formatted_address ?? placeLabel;
-      } catch {
-        // Keep fallback label.
-      }
-
-      const selected: Place = { label: placeLabel, lat, lng };
-      setText(selected.label);
-      onSelect(selected);
+    const done = (lat: number, lng: number) => {
+      readyLocationRef.current = { lat, lng };
+      rememberLocationPoint({ lat, lng });
+      setReadyLocation(readyLocationRef.current);
+      applyCurrentLocation(lat, lng);
       setLoading(false);
-    })();
+    };
+
+    const fail = () => {
+      const stale =
+        readyLocationRef.current ?? peekLastKnownLocation()?.point ?? null;
+      if (stale) {
+        done(stale.lat, stale.lng);
+        return;
+      }
+      setText("No se pudo obtener tu ubicación");
+      setLoading(false);
+    };
+
+    if (readyLocationRef.current) {
+      done(readyLocationRef.current.lat, readyLocationRef.current.lng);
+      return;
+    }
+
+    if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
+      fail();
+      return;
+    }
+
+    const attempts: PositionOptions[] = [
+      // Fastest on laptops: accept recent cached position first.
+      { enableHighAccuracy: false, maximumAge: 600_000, timeout: 4_000 },
+      // Then try fresher fixes.
+      { enableHighAccuracy: false, maximumAge: 120_000, timeout: 8_000 },
+      { enableHighAccuracy: false, maximumAge: 0, timeout: 12_000 },
+    ];
+
+    const runAttempt = (index: number) => {
+      navigator.geolocation.getCurrentPosition(
+        (position) => done(position.coords.latitude, position.coords.longitude),
+        () => {
+          if (index + 1 < attempts.length) {
+            runAttempt(index + 1);
+            return;
+          }
+
+          // Last chance: short one-shot watch often succeeds where getCurrentPosition stalls.
+          const watchId = navigator.geolocation.watchPosition(
+            (position) => {
+              navigator.geolocation.clearWatch(watchId);
+              done(position.coords.latitude, position.coords.longitude);
+            },
+            () => {
+              navigator.geolocation.clearWatch(watchId);
+              fail();
+            },
+            { enableHighAccuracy: false, maximumAge: 30_000, timeout: 10_000 },
+          );
+        },
+        attempts[index]!,
+      );
+    };
+
+    runAttempt(0);
   };
 
   const pickSuggestion = async (
@@ -392,33 +440,55 @@ function PlaceField({
             const next = event.target.value;
             setText(next);
             if (next.trim() === "") onClear();
-            fetchSuggestions(next);
+            else if (next.trim() !== CURRENT_LOCATION_LABEL) {
+              fetchSuggestions(next);
+            }
           }}
           onFocus={() => {
-            if (readyLocation || suggestions.length > 0) setOpen(true);
+            if (allowCurrentLocation || suggestions.length > 0) setOpen(true);
           }}
-          className="min-h-14 w-full rounded-xl border border-slate-600 bg-white py-3 pl-12 pr-4 text-base text-slate-900 outline-none placeholder:text-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30"
+          className={`min-h-14 w-full rounded-xl border border-slate-600 bg-white py-3 pl-12 text-base text-slate-900 outline-none placeholder:text-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 ${
+            allowCurrentLocation ? "pr-14" : "pr-4"
+          }`}
         />
+        {allowCurrentLocation && (
+          <button
+            type="button"
+            onMouseDown={(event) => event.preventDefault()}
+            onClick={pickCurrentLocation}
+            aria-label="Mi ubicación actual"
+            className="absolute right-2 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-sky-600 active:bg-sky-50"
+          >
+            <GpsIcon className="h-6 w-6" />
+          </button>
+        )}
         {loading && (
-          <p className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-xs text-slate-400">
+          <p
+            className={`pointer-events-none absolute top-1/2 -translate-y-1/2 text-xs text-slate-400 ${
+              allowCurrentLocation ? "right-14" : "right-3"
+            }`}
+          >
             ...
           </p>
         )}
       </div>
-      {open && (readyLocation || suggestions.length > 0) && (
+      {open && (allowCurrentLocation || suggestions.length > 0) && (
         <ul className="absolute top-full z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-600 bg-white py-1 shadow-lg">
-          {readyLocation && (
+          {allowCurrentLocation && (
             <li>
               <button
                 type="button"
+                onMouseDown={(event) => event.preventDefault()}
                 onClick={pickCurrentLocation}
-                aria-label="Ubicación actual"
+                aria-label="Mi ubicación actual"
                 className="flex w-full items-center gap-3 border-b border-slate-100 px-4 py-3.5 text-left text-slate-900 active:bg-slate-100"
               >
                 <span className="text-sky-600">
                   <GpsIcon className="h-6 w-6" />
                 </span>
-                <span className="text-sm font-semibold text-sky-700">Aquí</span>
+                <span className="text-sm font-semibold text-sky-700">
+                  Mi ubicación actual
+                </span>
               </button>
             </li>
           )}
@@ -513,6 +583,147 @@ function TiltBackIcon() {
   );
 }
 
+
+function StopIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+      <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" />
+    </svg>
+  );
+}
+
+function NavigationIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+      <path
+        fill="currentColor"
+        d="M12 2 L19 19 L12 15 L5 19 Z"
+        opacity="0.9"
+      />
+    </svg>
+  );
+}
+
+function NavigationInstructionPanel({
+  guidance,
+}: {
+  guidance: NavigationGuidance | null;
+}) {
+  if (!guidance) return null;
+
+  return (
+    <div className="google-banner-reserve-top pointer-events-none absolute right-3 top-0 z-10 max-w-[min(18rem,calc(100%-5rem))]">
+      <div className="rounded-2xl border border-white/20 bg-black/80 px-4 py-3 shadow-lg backdrop-blur-md">
+        {guidance.rerouting ? (
+          <p className="mb-1 text-xs font-medium text-sky-300">Recalculando ruta…</p>
+        ) : guidance.distanceText ? (
+          <p className="text-xl font-bold leading-none text-white">
+            {guidance.distanceText}
+          </p>
+        ) : null}
+        <p className="mt-1 text-sm leading-snug text-white/90">
+          {guidance.instruction}
+        </p>
+        {guidance.remainingText && !guidance.rerouting && (
+          <p className="mt-2 text-xs text-white/50">
+            {guidance.remainingText} restantes
+          </p>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function NavigationControls({
+  route,
+  routeData,
+  lastPositionRef,
+  onGuidanceChange,
+  onNavRef,
+  onNavigatingChange,
+  onReroute,
+}: {
+  route: Route;
+  routeData: RouteData | null;
+  lastPositionRef: { current: PathPoint | null };
+  onGuidanceChange: (guidance: NavigationGuidance | null) => void;
+  onNavRef: (nav: RouteNavigation | null) => void;
+  onNavigatingChange: (navigating: boolean) => void;
+  onReroute: (origin: PathPoint) => Promise<RouteData>;
+}) {
+  const navRef = useRef<RouteNavigation | null>(null);
+  const [navigating, setNavigating] = useState(false);
+
+  useEffect(() => {
+    navRef.current?.dispose();
+    navRef.current = null;
+    onNavRef(null);
+    onNavigatingChange(false);
+    setNavigating(false);
+    onGuidanceChange(null);
+  }, [route, onGuidanceChange, onNavRef, onNavigatingChange]);
+
+  useEffect(() => {
+    if (navRef.current && routeData) {
+      navRef.current.updateRouteData(routeData);
+    }
+  }, [routeData]);
+
+  useEffect(
+    () => () => {
+      navRef.current?.dispose();
+      onNavRef(null);
+      onNavigatingChange(false);
+    },
+    [onNavRef, onNavigatingChange],
+  );
+
+  const toggle = () => {
+    if (!route.originIsCurrentLocation || !routeData) return;
+
+    if (navigating) {
+      navRef.current?.stop();
+      navRef.current = null;
+      onNavRef(null);
+      onNavigatingChange(false);
+      setNavigating(false);
+      onGuidanceChange(null);
+      return;
+    }
+
+    navRef.current?.dispose();
+    const nav = new RouteNavigation({
+      route,
+      data: routeData,
+      onGuidance: onGuidanceChange,
+      onReroute,
+    });
+    navRef.current = nav;
+    onNavRef(nav);
+    nav.start(lastPositionRef.current ?? undefined);
+    onNavigatingChange(true);
+    setNavigating(true);
+  };
+
+  if (!route.originIsCurrentLocation || !routeData) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={toggle}
+      aria-label={navigating ? "Detener navegación" : "Iniciar navegación"}
+      className={`pointer-events-auto flex h-12 min-w-12 items-center justify-center gap-2 rounded-full border px-4 text-sm font-semibold shadow-lg backdrop-blur-md active:scale-[0.98] ${
+        navigating
+          ? "border-sky-400/40 bg-sky-600 text-white active:bg-sky-500"
+          : "border-white/25 bg-black/75 text-white active:bg-black/90"
+      }`}
+    >
+      {navigating ? <StopIcon /> : <NavigationIcon />}
+      <span>{navigating ? "Stop" : "Navegar"}</span>
+    </button>
+  );
+}
+
 function CameraPills({
   mapRef,
 }: {
@@ -567,7 +778,7 @@ function CameraPills({
     "pointer-events-none flex overflow-hidden rounded-full border border-white/25 bg-black/75 shadow-lg backdrop-blur-md";
 
   return (
-    <div className="pointer-events-none absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 z-10 flex flex-col items-end gap-2">
+    <>
       <button
         type="button"
         className="pointer-events-auto flex h-12 w-12 items-center justify-center rounded-full border border-white/25 bg-black/75 shadow-lg backdrop-blur-md active:bg-black/90"
@@ -594,7 +805,7 @@ function CameraPills({
           <TiltBackIcon />
         </button>
       </div>
-    </div>
+    </>
   );
 }
 
@@ -602,20 +813,68 @@ function Map3D({
   apiKey,
   route,
   onStatusChange,
+  onGuidanceChange,
 }: {
   apiKey: string;
   route: Route;
   onStatusChange: (status: MapStatus) => void;
+  onGuidanceChange: (guidance: NavigationGuidance | null) => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.maps3d.Map3DElement | null>(null);
+  const routeHandleRef = useRef<RouteRenderHandle | null>(null);
+  const locationRef = useRef<UserLocationIndicator | null>(null);
+  const lastPositionRef = useRef<PathPoint | null>(null);
+  const navRef = useRef<RouteNavigation | null>(null);
+  const trackerRef = useRef<LocationTracker | null>(null);
   const onStatusRef = useRef(onStatusChange);
+  const onGuidanceRef = useRef(onGuidanceChange);
   onStatusRef.current = onStatusChange;
+  onGuidanceRef.current = onGuidanceChange;
+
+  const [routeData, setRouteData] = useState<RouteData | null>(null);
+  const [navigating, setNavigating] = useState(false);
+  const navigatingRef = useRef(false);
+  const targetRef = useRef<PathPoint | null>(null);
+  const displayRef = useRef<PathPoint | null>(null);
+  const rafRef = useRef<number | null>(null);
+  const lastRecenterAtRef = useRef(0);
+  const lastFrameAtRef = useRef(0);
+  const mapSteadyRef = useRef(true);
+  const lastRouteVisualRef = useRef<PathPoint | null>(null);
 
   const applyNorthUp = useCallback(() => {
     if (mapRef.current) {
       mapRef.current.heading = 0;
     }
+  }, []);
+
+  const rerouteFrom = useCallback(
+    async (origin: PathPoint) => {
+      const map = mapRef.current;
+      if (!map) throw new Error("Map not ready");
+      routeHandleRef.current?.remove();
+      const { handle, data } = await renderRouteOnMap(map, route, origin, {
+        showOriginMarker: !route.originIsCurrentLocation,
+      });
+      routeHandleRef.current = handle;
+      setRouteData(data);
+      lastPositionRef.current = origin;
+      locationRef.current?.tick(origin, mapRef.current?.range ?? null);
+      locationRef.current?.bringToFront();
+      handle.updateRemainingPath(origin);
+      navRef.current?.updateRouteData(data);
+      return data;
+    },
+    [route],
+  );
+
+  const handleLivePosition = useCallback((sample: LocationSample) => {
+    const point = sample.point;
+    lastPositionRef.current = point;
+    targetRef.current = point;
+    if (!displayRef.current) displayRef.current = point;
+    navRef.current?.handlePosition(point);
   }, []);
 
   useEffect(() => {
@@ -632,10 +891,94 @@ function Map3D({
       error: null,
       info: null,
     });
+    onGuidanceRef.current(null);
+    setRouteData(null);
 
-    const attachRoute = async (
-      mapEl: google.maps.maps3d.Map3DElement,
-    ) => {
+    const stopTracker = () => {
+      trackerRef.current?.stop();
+      trackerRef.current = null;
+    };
+
+    const stopAnimation = () => {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current);
+        rafRef.current = null;
+      }
+    };
+
+    const animateLive = (now: number) => {
+      const map = mapRef.current;
+      const target = targetRef.current;
+      const display = displayRef.current;
+      if (!map || !target || !display) return;
+
+      const dt = clampDeltaMs(
+        lastFrameAtRef.current ? now - lastFrameAtRef.current : 16,
+      );
+      lastFrameAtRef.current = now;
+
+      const next = smoothPoint(display, target, dt, 260);
+      displayRef.current = next;
+
+      const interacting = !mapSteadyRef.current;
+      locationRef.current?.tick(next, map.range ?? null, { light: interacting });
+
+      if (
+        routeHandleRef.current &&
+        (!interacting || hasMovedMeters(lastRouteVisualRef.current ?? next, next, 8))
+      ) {
+        if (hasMovedMeters(lastRouteVisualRef.current ?? next, next, 1.5)) {
+          routeHandleRef.current.updateRemainingPath(next);
+          lastRouteVisualRef.current = next;
+        }
+      }
+
+      if (navigatingRef.current) {
+        if (now - lastRecenterAtRef.current >= 60_000) {
+          map.flyCameraTo({
+            durationMillis: 900,
+            endCamera: {
+              center: { lat: next.lat, lng: next.lng, altitude: 0 },
+              range: map.range,
+              tilt: map.tilt,
+              heading: map.heading,
+            },
+          });
+          lastRecenterAtRef.current = now;
+        }
+      }
+    };
+
+    const startAnimation = () => {
+      stopAnimation();
+      lastFrameAtRef.current = 0;
+      const tick = (now: number) => {
+        if (!document.hidden) {
+          animateLive(now);
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    };
+
+    const startTracker = () => {
+      if (!route.originIsCurrentLocation) return;
+      stopTracker();
+      const tracker = new LocationTracker();
+      trackerRef.current = tracker;
+      tracker.start(handleLivePosition, (message) => {
+        if (peekLastKnownLocation()) return;
+        onGuidanceRef.current({
+          instruction: message,
+          distanceText: null,
+          maneuver: null,
+          rerouting: false,
+          remainingText: null,
+        });
+      });
+    };
+
+    const attachRoute = async (mapEl: google.maps.maps3d.Map3DElement) => {
       if (dead || routeAttached) return;
       routeAttached = true;
 
@@ -646,51 +989,80 @@ function Map3D({
         info: null,
       });
 
-      const { Route3DElement } = await google.maps.importLibrary("routes");
-      if (dead) return;
+      try {
+        if (dead) return;
 
-      const line = new Route3DElement({
-        origin: { lat: route.origin.lat, lng: route.origin.lng },
-        destination: { lat: route.destination.lat, lng: route.destination.lng },
-        travelMode: toTravelMode(route.mode),
-        autofitsCamera: false,
-        routingPreference: "TRAFFIC_UNAWARE",
-      });
+        if (route.originIsCurrentLocation) {
+          const seed = { lat: route.origin.lat, lng: route.origin.lng };
+          lastPositionRef.current = seed;
+          locationRef.current = await createUserLocationIndicator(mapEl);
+          locationRef.current.tick(seed, mapEl.range ?? null);
+          targetRef.current = seed;
+          displayRef.current = seed;
+          lastRouteVisualRef.current = seed;
+        }
 
-      mapEl.append(line);
+        const origin: PathPoint = {
+          lat: route.origin.lat,
+          lng: route.origin.lng,
+        };
+        const { handle, data } = await renderRouteOnMap(mapEl, route, origin, {
+          showOriginMarker: !route.originIsCurrentLocation,
+        });
+        if (dead) {
+          handle.remove();
+          return;
+        }
 
-      line.addEventListener(
-        "gmp-load",
-        () => {
-          if (mapEl) flyToRouteView(mapEl, route);
-          applyNorthUp();
-          const primary = line.routes?.[0];
-          onStatusRef.current({
-            loading: false,
-            phase: null,
-            error: null,
-            info: primary ? formatRouteInfo(primary) : null,
-          });
-        },
-        { once: true },
-      );
+        routeHandleRef.current = handle;
+        setRouteData(data);
 
-      line.addEventListener(
-        "gmp-error",
-        () => {
+        if (route.originIsCurrentLocation) {
+          handle.updateRemainingPath(
+            lastPositionRef.current ?? origin,
+          );
+          locationRef.current?.bringToFront();
+          startTracker();
+          startAnimation();
+        }
+
+        if (mapEl) flyToRouteView(mapEl, route);
+        applyNorthUp();
+
+        const localized = data.googleRoute.localizedValues;
+        onStatusRef.current({
+          loading: false,
+          phase: null,
+          error: null,
+          info: localized?.distance && localized?.duration
+            ? {
+                distance: localized.distance,
+                duration: localized.duration,
+              }
+            : {
+                distance: data.googleRoute.distanceMeters
+                  ? `${Math.round(data.googleRoute.distanceMeters / 1000)} km`
+                  : "—",
+                duration: data.googleRoute.durationMillis
+                  ? `${Math.round(data.googleRoute.durationMillis / 60_000)} min`
+                  : "—",
+              },
+        });
+      } catch {
+        if (!dead) {
           onStatusRef.current({
             loading: false,
             phase: null,
             error: "No se pudo calcular la ruta.",
             info: null,
           });
-        },
-        { once: true },
-      );
+        }
+      }
     };
 
     const onSteady = (event: Event) => {
       const { isSteady } = event as google.maps.maps3d.SteadyChangeEvent;
+      mapSteadyRef.current = isSteady;
       if (!isSteady || !map || dead) return;
       void attachRoute(map);
     };
@@ -719,7 +1091,6 @@ function Map3D({
       mapRef.current = map;
       map.addEventListener("gmp-steadychange", onSteady);
 
-      // Fallback if steady event is slow on some devices.
       window.setTimeout(() => {
         if (map) void attachRoute(map);
       }, 1200);
@@ -727,17 +1098,61 @@ function Map3D({
 
     return () => {
       dead = true;
+      stopTracker();
+      stopAnimation();
+      navRef.current?.dispose();
+      navRef.current = null;
       map?.removeEventListener("gmp-steadychange", onSteady);
+      routeHandleRef.current?.remove();
+      routeHandleRef.current = null;
+      locationRef.current?.remove();
+      locationRef.current = null;
       mapRef.current = null;
       map?.remove();
       el.replaceChildren();
     };
-  }, [apiKey, applyNorthUp, route]);
+  }, [apiKey, applyNorthUp, handleLivePosition, route]);
+
+  const bindNavigation = useCallback((nav: RouteNavigation | null) => {
+    navRef.current = nav;
+  }, []);
+
+  useEffect(() => {
+    navigatingRef.current = navigating;
+    const map = mapRef.current;
+    if (!map) return;
+    if (navigating) {
+      const p = lastPositionRef.current;
+      if (p) {
+        map.flyCameraTo({
+          durationMillis: 700,
+          endCamera: {
+            center: { lat: p.lat, lng: p.lng, altitude: 0 },
+            range: map.range,
+            tilt: map.tilt,
+            heading: map.heading,
+          },
+        });
+      }
+      lastRecenterAtRef.current = Date.now();
+    }
+  }, [navigating]);
 
   return (
     <div className="relative h-full w-full">
       <div ref={host} className="map-3d-host h-full w-full" />
-      <CameraPills mapRef={mapRef} />
+      <div className="pointer-events-none absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 z-10 flex flex-col items-end gap-2">
+        <NavigationControls
+          route={route}
+          routeData={routeData}
+          lastPositionRef={lastPositionRef}
+          onGuidanceChange={onGuidanceChange}
+          onNavRef={bindNavigation}
+          onNavigatingChange={setNavigating}
+          onReroute={rerouteFrom}
+        />
+        <CameraPills mapRef={mapRef} />
+      </div>
     </div>
   );
 }
@@ -845,13 +1260,18 @@ function MapScreen({
     error: null,
     info: null,
   });
+  const [guidance, setGuidance] = useState<NavigationGuidance | null>(null);
+
   return (
     <div className="relative h-dvh w-full bg-slate-950">
       <Map3D
         apiKey={apiKey}
         route={route}
         onStatusChange={setStatus}
+        onGuidanceChange={setGuidance}
       />
+
+      <NavigationInstructionPanel guidance={guidance} />
 
       {status.loading && status.phase === "map" && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-slate-950/50">
@@ -886,10 +1306,6 @@ function MapScreen({
       >
         Google Maps
       </a>
-
-      <p className="pointer-events-none absolute inset-x-0 bottom-[calc(max(0.75rem,env(safe-area-inset-bottom))+6.5rem)] z-0 px-4 text-center text-xs text-white/45">
-        Un dedo: mover · Pellizca: zoom · Dos dedos: inclinar y girar
-      </p>
     </div>
   );
 }
@@ -910,7 +1326,12 @@ export default function Page() {
   const openMap = useCallback(() => {
     if (!isPlaceSelected(origin) || !isPlaceSelected(destination)) return;
     void preloadMapScene(apiKey);
-    setRoute({ origin, destination, mode });
+    setRoute({
+      origin,
+      destination,
+      mode,
+      originIsCurrentLocation: origin.isCurrentLocation ?? false,
+    });
     setMapMounted(true);
     setScreen("map");
   }, [apiKey, destination, mode, origin]);

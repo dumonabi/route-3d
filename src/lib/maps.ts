@@ -46,6 +46,9 @@ const CARDINAL_ONLY =
 const DRAWER_LABEL =
   /expand|collapse|control panel|camera control|more control|menu|opciones|navigation control/i;
 
+const GESTURE_HINT =
+  /usa\s+\d|use\s+\d|dedos|fingers|two\s+finger|pellizca|pinch|arrastra|drag\s+to|inclinar|tilt|zoom/i;
+
 function controlLabel(btn: Element): string {
   return (
     btn.getAttribute("aria-label") ??
@@ -314,12 +317,30 @@ function hideZoomPanButton(btn: HTMLElement): void {
   }
 }
 
+/** Hide Google's bottom gesture-hint overlay ("usa 2 dedos…"). */
+function hideGestureHints(root: ShadowRoot): void {
+  for (const el of root.querySelectorAll<HTMLElement>("*")) {
+    const text = (el.textContent ?? "").replace(/\s+/g, " ").trim();
+    if (text.length < 10 || text.length > 180) continue;
+    if (!GESTURE_HINT.test(text)) continue;
+
+    let target: HTMLElement = el;
+    for (let depth = 0; depth < 5; depth++) {
+      const parent = target.parentElement;
+      if (!parent || parent === root as unknown as HTMLElement) break;
+      target = parent;
+    }
+    markHidden(target);
+  }
+}
+
 /** Expand drawer, then keep rotate + tilt in the bottom-right toolbar. */
 export function hideMapControls(map: HTMLElement): void {
   const root = map.shadowRoot;
   if (!root) return;
 
   resetControlOverrides(root);
+  hideGestureHints(root);
 
   if (expandCameraControls(map, root)) return;
 
@@ -452,6 +473,7 @@ export function preloadMapScene(apiKey: string): Promise<void> {
     Promise.all([
       google.maps.importLibrary("maps3d"),
       google.maps.importLibrary("routes"),
+      google.maps.importLibrary("marker"),
     ]).then(() => undefined),
   );
 
@@ -512,6 +534,10 @@ export function earthCameraLimits(): Pick<
   };
 }
 
+/** Preview + navigation camera: same oblique angle as route overview. */
+export const NAV_CAMERA_TILT = 72;
+export const NAV_CAMERA_HEADING = 0;
+
 /** Smooth cinematic fly-in along the route with strong tilt. */
 export function flyToRouteView(
   map: google.maps.maps3d.Map3DElement,
@@ -522,8 +548,8 @@ export function flyToRouteView(
     endCamera: {
       center: routeCenter(route),
       range: routeFlyRange(route),
-      tilt: 72,
-      heading: 0,
+      tilt: NAV_CAMERA_TILT,
+      heading: NAV_CAMERA_HEADING,
     },
   });
 }
