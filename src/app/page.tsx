@@ -202,7 +202,9 @@ function PlaceField({
     useRef<google.maps.places.AutocompleteSessionToken | null>(null);
   const debounceRef = useRef<number | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
   const readyLocationRef = useRef<{ lat: number; lng: number } | null>(null);
+  const pickingLocationRef = useRef(false);
 
   useEffect(() => {
     if (value) setText(value);
@@ -263,8 +265,8 @@ function PlaceField({
         setOpen(false);
       }
     };
-    document.addEventListener("pointerdown", onDocClick);
-    return () => document.removeEventListener("pointerdown", onDocClick);
+    document.addEventListener("click", onDocClick);
+    return () => document.removeEventListener("click", onDocClick);
   }, []);
 
   const fetchSuggestions = (input: string) => {
@@ -319,9 +321,16 @@ function PlaceField({
   };
 
   const pickCurrentLocation = () => {
+    if (pickingLocationRef.current) return;
+    pickingLocationRef.current = true;
+
     setOpen(false);
     setLoading(true);
     setText("Obteniendo ubicación...");
+
+    const finish = () => {
+      pickingLocationRef.current = false;
+    };
 
     const done = (lat: number, lng: number) => {
       readyLocationRef.current = { lat, lng };
@@ -329,6 +338,7 @@ function PlaceField({
       setReadyLocation(readyLocationRef.current);
       applyCurrentLocation(lat, lng);
       setLoading(false);
+      finish();
     };
 
     const fail = () => {
@@ -340,12 +350,8 @@ function PlaceField({
       }
       setText("No se pudo obtener tu ubicación");
       setLoading(false);
+      finish();
     };
-
-    if (readyLocationRef.current) {
-      done(readyLocationRef.current.lat, readyLocationRef.current.lng);
-      return;
-    }
 
     if (typeof navigator === "undefined" || !("geolocation" in navigator)) {
       fail();
@@ -353,11 +359,10 @@ function PlaceField({
     }
 
     const attempts: PositionOptions[] = [
-      // Fastest on laptops: accept recent cached position first.
-      { enableHighAccuracy: false, maximumAge: 600_000, timeout: 4_000 },
-      // Then try fresher fixes.
-      { enableHighAccuracy: false, maximumAge: 120_000, timeout: 8_000 },
-      { enableHighAccuracy: false, maximumAge: 0, timeout: 12_000 },
+      // Mobile GPS: prefer a fresh high-accuracy fix on user tap.
+      { enableHighAccuracy: true, maximumAge: 30_000, timeout: 12_000 },
+      { enableHighAccuracy: true, maximumAge: 0, timeout: 18_000 },
+      { enableHighAccuracy: false, maximumAge: 600_000, timeout: 8_000 },
     ];
 
     const runAttempt = (index: number) => {
@@ -369,7 +374,6 @@ function PlaceField({
             return;
           }
 
-          // Last chance: short one-shot watch often succeeds where getCurrentPosition stalls.
           const watchId = navigator.geolocation.watchPosition(
             (position) => {
               navigator.geolocation.clearWatch(watchId);
@@ -377,9 +381,16 @@ function PlaceField({
             },
             () => {
               navigator.geolocation.clearWatch(watchId);
+              if (readyLocationRef.current) {
+                done(
+                  readyLocationRef.current.lat,
+                  readyLocationRef.current.lng,
+                );
+                return;
+              }
               fail();
             },
-            { enableHighAccuracy: false, maximumAge: 30_000, timeout: 10_000 },
+            { enableHighAccuracy: true, maximumAge: 60_000, timeout: 15_000 },
           );
         },
         attempts[index]!,
@@ -387,6 +398,13 @@ function PlaceField({
     };
 
     runAttempt(0);
+  };
+
+  const onPickCurrentLocation = (event: React.PointerEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    inputRef.current?.blur();
+    pickCurrentLocation();
   };
 
   const pickSuggestion = async (
@@ -430,7 +448,8 @@ function PlaceField({
           {icon}
         </span>
         <input
-          type="text"
+          ref={inputRef}
+          type="search"
           value={text}
           autoComplete="off"
           enterKeyHint="search"
@@ -445,7 +464,10 @@ function PlaceField({
             }
           }}
           onFocus={() => {
-            if (allowCurrentLocation || suggestions.length > 0) setOpen(true);
+            setOpen(true);
+            window.requestAnimationFrame(() => {
+              inputRef.current?.scrollIntoView({ block: "center", behavior: "smooth" });
+            });
           }}
           className={`min-h-14 w-full rounded-xl border border-slate-600 bg-white py-3 pl-12 text-base text-slate-900 outline-none placeholder:text-slate-400 focus:border-sky-500 focus:ring-2 focus:ring-sky-500/30 ${
             allowCurrentLocation ? "pr-14" : "pr-4"
@@ -454,10 +476,9 @@ function PlaceField({
         {allowCurrentLocation && (
           <button
             type="button"
-            onMouseDown={(event) => event.preventDefault()}
-            onClick={pickCurrentLocation}
+            onPointerDown={onPickCurrentLocation}
             aria-label="Mi ubicación actual"
-            className="absolute right-2 top-1/2 z-10 flex h-10 w-10 -translate-y-1/2 items-center justify-center rounded-full text-sky-600 active:bg-sky-50"
+            className="absolute right-1 top-1/2 z-20 flex h-12 w-12 -translate-y-1/2 touch-manipulation items-center justify-center rounded-full text-sky-600 active:bg-sky-50"
           >
             <GpsIcon className="h-6 w-6" />
           </button>
@@ -473,15 +494,14 @@ function PlaceField({
         )}
       </div>
       {open && (allowCurrentLocation || suggestions.length > 0) && (
-        <ul className="absolute top-full z-20 mt-1 max-h-56 w-full overflow-y-auto rounded-xl border border-slate-600 bg-white py-1 shadow-lg">
+        <ul className="absolute top-full z-30 mt-1 max-h-56 w-full overflow-y-auto overscroll-contain rounded-xl border border-slate-600 bg-white py-1 shadow-lg">
           {allowCurrentLocation && (
             <li>
               <button
                 type="button"
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={pickCurrentLocation}
+                onPointerDown={onPickCurrentLocation}
                 aria-label="Mi ubicación actual"
-                className="flex w-full items-center gap-3 border-b border-slate-100 px-4 py-3.5 text-left text-slate-900 active:bg-slate-100"
+                className="flex min-h-12 w-full touch-manipulation items-center gap-3 border-b border-slate-100 px-4 py-3.5 text-left text-slate-900 active:bg-slate-100"
               >
                 <span className="text-sky-600">
                   <GpsIcon className="h-6 w-6" />
@@ -499,8 +519,13 @@ function PlaceField({
               <li key={`${prediction.placeId}-${index}`}>
                 <button
                   type="button"
-                  onClick={() => void pickSuggestion(suggestion)}
-                  className="w-full px-4 py-3 text-left text-sm text-slate-900 active:bg-slate-100"
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    inputRef.current?.blur();
+                    void pickSuggestion(suggestion);
+                  }}
+                  className="min-h-12 w-full touch-manipulation px-4 py-3 text-left text-sm text-slate-900 active:bg-slate-100"
                 >
                   <span className="block font-medium">
                     {prediction.mainText?.text ?? prediction.text.text}
