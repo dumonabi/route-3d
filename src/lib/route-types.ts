@@ -20,6 +20,16 @@ export type NavigationGuidance = {
   maneuver: string | null;
   rerouting: boolean;
   remainingText: string | null;
+  nextInstruction?: string | null;
+};
+
+export type NavigationLiveState = {
+  position: { lat: number; lng: number } | null;
+  heading: number | null;
+  fullPath: { lat: number; lng: number }[];
+  remainingPath: { lat: number; lng: number }[];
+  visiblePath: { lat: number; lng: number }[];
+  destination: { lat: number; lng: number };
 };
 
 export type MapStatus = {

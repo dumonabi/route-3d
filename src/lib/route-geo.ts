@@ -34,6 +34,26 @@ export function interpolatePoint(a: PathPoint, b: PathPoint, t: number): PathPoi
   };
 }
 
+export function circlePath(
+  center: PathPoint,
+  radiusM: number,
+  segments = 28,
+): PathPoint[] {
+  const points: PathPoint[] = [];
+  const latRad = (center.lat * Math.PI) / 180;
+  const mPerDegLat = 111_320;
+  const mPerDegLng = 111_320 * Math.cos(latRad);
+
+  for (let i = 0; i <= segments; i++) {
+    const angle = (i / segments) * 2 * Math.PI;
+    points.push({
+      lat: center.lat + (radiusM * Math.sin(angle)) / mPerDegLat,
+      lng: center.lng + (radiusM * Math.cos(angle)) / mPerDegLng,
+    });
+  }
+  return points;
+}
+
 export type NearestOnPath = {
   point: PathPoint;
   distanceAlong: number;
@@ -138,4 +158,70 @@ export function cameraRangeForHeight(heightM: number, tiltDeg: number): number {
 export function formatMeters(meters: number): string {
   if (meters < 1000) return `${Math.round(meters / 10) * 10} m`;
   return `${(meters / 1000).toFixed(1)} km`;
+}
+
+/** Bearing from `from` to `to` in degrees (0 = north, clockwise). */
+export function bearingDegrees(from: PathPoint, to: PathPoint): number {
+  const φ1 = (from.lat * Math.PI) / 180;
+  const φ2 = (to.lat * Math.PI) / 180;
+  const Δλ = ((to.lng - from.lng) * Math.PI) / 180;
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x =
+    Math.cos(φ1) * Math.sin(φ2) - Math.sin(φ1) * Math.cos(φ2) * Math.cos(Δλ);
+  return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+}
+
+/** Point `meters` along a polyline from its start. */
+export function pointAlongPath(path: PathPoint[], meters: number): PathPoint {
+  if (path.length === 0) return { lat: 0, lng: 0 };
+  if (path.length === 1 || meters <= 0) return path[0]!;
+  let traveled = 0;
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1]!;
+    const b = path[i]!;
+    const seg = haversineMeters(a, b);
+    if (seg <= 0) continue;
+    if (traveled + seg >= meters) {
+      return interpolatePoint(a, b, (meters - traveled) / seg);
+    }
+    traveled += seg;
+  }
+  return path[path.length - 1]!;
+}
+
+/** First `maxMeters` of a polyline from its start. */
+export function slicePathToMaxMeters(
+  path: PathPoint[],
+  maxMeters: number,
+): PathPoint[] {
+  if (path.length < 2 || maxMeters <= 0) return path;
+  const result: PathPoint[] = [path[0]!];
+  let traveled = 0;
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1]!;
+    const b = path[i]!;
+    const seg = haversineMeters(a, b);
+    if (seg <= 0) continue;
+    if (traveled + seg >= maxMeters) {
+      result.push(interpolatePoint(a, b, (maxMeters - traveled) / seg));
+      return result;
+    }
+    result.push(b);
+    traveled += seg;
+  }
+  return result;
+}
+
+/** Local east (x) / north (y) offsets in meters from an origin. */
+export function toLocalMeters(
+  origin: PathPoint,
+  point: PathPoint,
+): { x: number; y: number } {
+  const latRad = (origin.lat * Math.PI) / 180;
+  const mPerDegLat = 111_320;
+  const mPerDegLng = 111_320 * Math.cos(latRad);
+  return {
+    x: (point.lng - origin.lng) * mPerDegLng,
+    y: (point.lat - origin.lat) * mPerDegLat,
+  };
 }

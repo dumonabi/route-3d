@@ -1,5 +1,6 @@
 import {
   buildCumulativeDistances,
+  circlePath,
   haversineMeters,
   nearestPointOnPath,
   sliceRemainingPath,
@@ -37,6 +38,14 @@ function toTravelMode(mode: Mode): google.maps.TravelMode {
   return google.maps.TravelMode.DRIVING;
 }
 
+function stripHtml(text: string): string {
+  return text
+    .replace(/<[^>]*>/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function buildNavSteps(googleRoute: google.maps.routes.Route): NavStep[] {
   const steps: NavStep[] = [];
   let cum = 0;
@@ -44,14 +53,16 @@ function buildNavSteps(googleRoute: google.maps.routes.Route): NavStep[] {
   for (const leg of googleRoute.legs ?? []) {
     for (const step of leg.steps) {
       const stepPath = step.path?.map(toPathPoint) ?? [];
-      let stepLen = 0;
-      for (let i = 1; i < stepPath.length; i++) {
-        stepLen += haversineMeters(stepPath[i - 1]!, stepPath[i]!);
+      let stepLen = step.distanceMeters ?? 0;
+      if (stepLen <= 0 && stepPath.length > 1) {
+        for (let i = 1; i < stepPath.length; i++) {
+          stepLen += haversineMeters(stepPath[i - 1]!, stepPath[i]!);
+        }
       }
       const startDist = cum;
       cum += stepLen;
       steps.push({
-        instruction: step.instructions ?? "Continúa recto",
+        instruction: stripHtml(step.instructions ?? "Continúa recto"),
         maneuver: step.maneuver ?? null,
         distanceText: step.localizedValues?.distance ?? null,
         startDist,
@@ -68,11 +79,13 @@ export async function fetchRouteData(
   origin: PathPoint,
 ): Promise<RouteData> {
   const { Route: RouteClass } = await google.maps.importLibrary("routes");
-  const { routes } = await RouteClass.computeRoutes({
+
+  const request: google.maps.routes.ComputeRoutesRequest = {
     origin,
     destination: { lat: route.destination.lat, lng: route.destination.lng },
     travelMode: toTravelMode(route.mode),
-    routingPreference: "TRAFFIC_UNAWARE",
+    language: "es",
+    units: google.maps.UnitSystem.METRIC,
     fields: [
       "path",
       "legs",
@@ -80,7 +93,14 @@ export async function fetchRouteData(
       "durationMillis",
       "localizedValues",
     ],
-  });
+  };
+
+  // routingPreference is only valid for DRIVE; it breaks walking/bike/transit.
+  if (route.mode === "DRIVING") {
+    request.routingPreference = "TRAFFIC_UNAWARE";
+  }
+
+  const { routes } = await RouteClass.computeRoutes(request);
 
   const googleRoute = routes?.[0];
   const path = googleRoute?.path?.map(toPathPoint);
@@ -117,7 +137,8 @@ export async function renderRouteOnMap(
     routeLines.push(line);
   }
 
-  const { Marker3DElement } = await google.maps.importLibrary("maps3d");
+  const { Marker3DElement, Polygon3DElement, AltitudeMode } =
+    await google.maps.importLibrary("maps3d");
   const { PinElement } = await google.maps.importLibrary("marker");
 
   const destMarker = new Marker3DElement({
@@ -134,18 +155,18 @@ export async function renderRouteOnMap(
   elements.push(destMarker);
 
   if (options.showOriginMarker) {
-    const originMarker = new Marker3DElement({
-      position: { lat: origin.lat, lng: origin.lng },
+    const originDot = new Polygon3DElement({
+      altitudeMode: AltitudeMode.CLAMP_TO_GROUND,
+      fillColor: "#22c55e",
+      strokeColor: "#ffffff",
+      strokeWidth: 2.5,
+      geodesic: true,
+      drawsOccludedSegments: true,
+      zIndex: 298,
+      path: circlePath(origin, 22),
     });
-    const originPin = new PinElement({
-      background: "#22c55e",
-      borderColor: "#ffffff",
-      glyphText: "A",
-      scale: 1.05,
-    });
-    originMarker.append(originPin);
-    map.append(originMarker);
-    elements.push(originMarker);
+    map.append(originDot);
+    elements.push(originDot);
   }
 
   const applyPath = (path: PathPoint[]) => {
@@ -196,15 +217,28 @@ export async function renderRouteOnMap(
   };
 }
 
+export function findStepIndexForDistance(
+  distanceAlong: number,
+  steps: NavStep[],
+  hintIndex = 0,
+): number {
+  if (!steps.length) return 0;
+  let index = Math.min(Math.max(hintIndex, 0), steps.length - 1);
+  while (index < steps.length - 1 && distanceAlong >= steps[index]!.endDist) {
+    index++;
+  }
+  while (index > 0 && distanceAlong < steps[index]!.startDist) {
+    index--;
+  }
+  return index;
+}
+
 export function findCurrentStep(
   distanceAlong: number,
   steps: NavStep[],
 ): NavStep | null {
   if (!steps.length) return null;
-  for (const step of steps) {
-    if (distanceAlong < step.endDist - 5) return step;
-  }
-  return steps[steps.length - 1] ?? null;
+  return steps[findStepIndexForDistance(distanceAlong, steps)] ?? null;
 }
 
 export function distanceToStepManeuver(

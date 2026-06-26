@@ -1,3 +1,5 @@
+import type { PathPoint } from "@/lib/route-geo";
+import { bearingDegrees, haversineMeters } from "@/lib/route-geo";
 import type { Route } from "@/lib/route-types";
 
 const MAPS_VERSION = "alpha";
@@ -489,15 +491,176 @@ export function routeCenter(route: Route) {
 }
 
 export function routeDistanceKm(route: Route): number {
-  const lat = route.origin.lat - route.destination.lat;
-  const lng = route.origin.lng - route.destination.lng;
-  return Math.hypot(lat, lng) * 111;
+  return (
+    haversineMeters(
+      { lat: route.origin.lat, lng: route.origin.lng },
+      { lat: route.destination.lat, lng: route.destination.lng },
+    ) / 1000
+  );
 }
 
-/** Higher range = less detail = faster first paint. */
+/** Ground span to fit on screen: trip length or bounding box, whichever is larger. */
+export function routeSpanMeters(route: Route): number {
+  const a = { lat: route.origin.lat, lng: route.origin.lng };
+  const b = { lat: route.destination.lat, lng: route.destination.lng };
+  const trip = haversineMeters(a, b);
+  const midLat = (a.lat + b.lat) / 2;
+  const latM = Math.abs(a.lat - b.lat) * 111_320;
+  const lngM =
+    Math.abs(a.lng - b.lng) * 111_320 * Math.cos((midLat * Math.PI) / 180);
+  return Math.max(trip, latM, lngM, 200);
+}
+
+export function routeSpanFromPath(points: PathPoint[]): number {
+  if (points.length === 0) return 200;
+  let minLat = points[0]!.lat;
+  let maxLat = points[0]!.lat;
+  let minLng = points[0]!.lng;
+  let maxLng = points[0]!.lng;
+  for (const p of points) {
+    minLat = Math.min(minLat, p.lat);
+    maxLat = Math.max(maxLat, p.lat);
+    minLng = Math.min(minLng, p.lng);
+    maxLng = Math.max(maxLng, p.lng);
+  }
+  const midLat = (minLat + maxLat) / 2;
+  const latM = (maxLat - minLat) * 111_320;
+  const lngM = (maxLng - minLng) * 111_320 * Math.cos((midLat * Math.PI) / 180);
+  return Math.max(latM, lngM, 200);
+}
+
+export function pathCenter(points: PathPoint[]) {
+  if (points.length === 0) return { lat: 0, lng: 0, altitude: 0 };
+  let minLat = points[0]!.lat;
+  let maxLat = points[0]!.lat;
+  let minLng = points[0]!.lng;
+  let maxLng = points[0]!.lng;
+  for (const p of points) {
+    minLat = Math.min(minLat, p.lat);
+    maxLat = Math.max(maxLat, p.lat);
+    minLng = Math.min(minLng, p.lng);
+    maxLng = Math.max(maxLng, p.lng);
+  }
+  return {
+    lat: (minLat + maxLat) / 2,
+    lng: (minLng + maxLng) / 2,
+    altitude: 0,
+  };
+}
+
+/** Preview + navigation camera: same oblique angle as route overview. */
+export const NAV_CAMERA_TILT = 72;
+export const NAV_CAMERA_HEADING = 0;
+
+/** In-navigation 3D panel: ~30° above the horizon, 2 km of route visible. */
+export const NAVIGATION_CAMERA_TILT = 30;
+export const NAVIGATION_VISIBLE_ROUTE_M = 2000;
+export const NAVIGATION_VIEWPORT_HEIGHT_FRACTION = 1 / 3;
+
+const ROUTE_VIEW_FOV = 50;
+
+/**
+ * Camera range that fits a ground span on screen (as close as possible with padding).
+ * Accounts for oblique preview tilt and vertical field of view.
+ */
+export function cameraRangeForRouteView(
+  spanMeters: number,
+  tiltDeg = NAV_CAMERA_TILT,
+  fovDeg = ROUTE_VIEW_FOV,
+  viewportHeightFraction = 1,
+): number {
+  const padding = 1.42;
+  const halfFovRad = ((fovDeg * Math.PI) / 180) / 2;
+  const tiltRad = (tiltDeg * Math.PI) / 180;
+
+  const baseRange = (spanMeters * padding) / (2 * Math.tan(halfFovRad));
+  const obliqueFactor = 0.5 + 0.5 / Math.max(0.28, Math.cos(tiltRad));
+  const viewportScale = 1 / Math.max(0.2, viewportHeightFraction);
+  const range = baseRange * obliqueFactor * viewportScale;
+
+  return Math.min(Math.max(Math.round(range), 320), 520_000);
+}
+
+export function navigationCameraRange(): number {
+  return cameraRangeForRouteView(
+    NAVIGATION_VISIBLE_ROUTE_M,
+    NAVIGATION_CAMERA_TILT,
+    ROUTE_VIEW_FOV,
+    NAVIGATION_VIEWPORT_HEIGHT_FRACTION,
+  );
+}
+
+export function resolveNavigationHeading(
+  position: PathPoint,
+  remainingPath: PathPoint[],
+  deviceHeading: number | null,
+): number {
+  if (deviceHeading != null) return deviceHeading;
+  const path = remainingPath.length >= 2 ? remainingPath : [position];
+  if (path.length < 2) return 0;
+  return bearingDegrees(path[0]!, path[1]!);
+}
+
+export function navigationCameraTarget(
+  position: PathPoint,
+  remainingPath: PathPoint[],
+  deviceHeading: number | null = null,
+): { center: google.maps.LatLngAltitudeLiteral; heading: number } {
+  const path = remainingPath.length >= 2 ? remainingPath : [position, position];
+  return {
+    center: { lat: position.lat, lng: position.lng, altitude: 0 },
+    heading: resolveNavigationHeading(position, path, deviceHeading),
+  };
+}
+
+export function applyNavigationCamera(
+  map: google.maps.maps3d.Map3DElement,
+  position: PathPoint,
+  remainingPath: PathPoint[],
+  deviceHeading: number | null = null,
+): void {
+  const { center, heading } = navigationCameraTarget(
+    position,
+    remainingPath,
+    deviceHeading,
+  );
+  map.center = center;
+  map.range = navigationCameraRange();
+  map.tilt = NAVIGATION_CAMERA_TILT;
+  map.heading = heading;
+}
+
+export function flyToNavigationView(
+  map: google.maps.maps3d.Map3DElement,
+  position: PathPoint,
+  remainingPath: PathPoint[],
+  deviceHeading: number | null = null,
+): void {
+  const { center, heading } = navigationCameraTarget(
+    position,
+    remainingPath,
+    deviceHeading,
+  );
+  map.flyCameraTo({
+    durationMillis: 900,
+    endCamera: {
+      center,
+      range: navigationCameraRange(),
+      tilt: NAVIGATION_CAMERA_TILT,
+      heading,
+    },
+  });
+}
+
+/** Initial map range before the route path is known. */
 export function initialMapRange(route: Route): number {
-  const km = routeDistanceKm(route);
-  return Math.min(Math.max(km * 2200, 100_000), 550_000);
+  return cameraRangeForRouteView(routeSpanMeters(route));
+}
+
+/** Camera range for the route overview fly-in. */
+export function routeFlyRange(route: Route, path?: PathPoint[]): number {
+  const span = path?.length ? routeSpanFromPath(path) : routeSpanMeters(route);
+  return cameraRangeForRouteView(span);
 }
 
 /** Bearing from origin to destination in degrees (0 = north). */
@@ -514,12 +677,6 @@ export function routeHeading(route: Route): number {
   return ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
 }
 
-/** Camera range for an immersive route fly-in. */
-export function routeFlyRange(route: Route): number {
-  const km = routeDistanceKm(route);
-  return Math.min(Math.max(km * 1400, 60_000), 420_000);
-}
-
 /** Unrestricted Earth-like camera limits. */
 export function earthCameraLimits(): Pick<
   google.maps.maps3d.Map3DElementOptions,
@@ -530,24 +687,53 @@ export function earthCameraLimits(): Pick<
     minTilt: 0,
     minAltitude: 5,
     maxAltitude: 30_000_000,
-    fov: 50,
+    fov: ROUTE_VIEW_FOV,
   };
 }
-
-/** Preview + navigation camera: same oblique angle as route overview. */
-export const NAV_CAMERA_TILT = 72;
-export const NAV_CAMERA_HEADING = 0;
 
 /** Smooth cinematic fly-in along the route with strong tilt. */
 export function flyToRouteView(
   map: google.maps.maps3d.Map3DElement,
   route: Route,
+  options?: { path?: PathPoint[] },
 ): void {
+  const path = options?.path;
+  const center = path?.length ? pathCenter(path) : routeCenter(route);
   map.flyCameraTo({
     durationMillis: 2200,
     endCamera: {
-      center: routeCenter(route),
-      range: routeFlyRange(route),
+      center,
+      range: routeFlyRange(route, path),
+      tilt: NAV_CAMERA_TILT,
+      heading: NAV_CAMERA_HEADING,
+    },
+  });
+}
+
+/** Refit the map to the remaining journey (current position + destination). */
+export function flyToRemainingRouteView(
+  map: google.maps.maps3d.Map3DElement,
+  current: PathPoint,
+  destination: PathPoint,
+  remainingPath?: PathPoint[],
+): void {
+  const path =
+    remainingPath && remainingPath.length >= 2
+      ? remainingPath
+      : [current, destination];
+
+  const framing: PathPoint[] = [current, ...path.slice(1), destination];
+  const unique: PathPoint[] = [];
+  for (const p of framing) {
+    const last = unique[unique.length - 1];
+    if (!last || haversineMeters(last, p) > 3) unique.push(p);
+  }
+
+  map.flyCameraTo({
+    durationMillis: 1400,
+    endCamera: {
+      center: pathCenter(unique),
+      range: cameraRangeForRouteView(routeSpanFromPath(unique)),
       tilt: NAV_CAMERA_TILT,
       heading: NAV_CAMERA_HEADING,
     },
