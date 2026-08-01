@@ -29,6 +29,8 @@ export type NavigationLiveState = {
   fullPath: { lat: number; lng: number }[];
   remainingPath: { lat: number; lng: number }[];
   visiblePath: { lat: number; lng: number }[];
+  /** Wrong-turn exits ahead (first ~500 m), light gray in guide view. */
+  exitPaths: { lat: number; lng: number }[][];
   destination: { lat: number; lng: number };
 };
 

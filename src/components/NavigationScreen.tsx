@@ -1,16 +1,68 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import {
-  NavigationFullRoutePreview,
-  NavigationRoutePreview,
-  NavigationVisibleNorthPreview,
-} from "@/components/NavigationRoutePreview";
+import { NavigationHeadingGuidePreview } from "@/components/NavigationRoutePreview";
 import { NavAudio } from "@/lib/nav-audio";
 import type {
   NavigationGuidance,
   NavigationLiveState,
 } from "@/lib/route-types";
+
+export type NavigationDisplayMode = "aerial" | "overview" | "guide";
+
+function AerialIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+      <path
+        fill="currentColor"
+        d="M12 2 L4 9 H7 V14 H11 V10 H13 V14 H17 V9 H20 Z M4 16 V18 H20 V16 Z"
+      />
+    </svg>
+  );
+}
+
+function OverviewIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+      <rect
+        x="3.5"
+        y="3.5"
+        width="17"
+        height="17"
+        rx="2.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+      />
+      <path
+        d="M7 17 L11 9 L14 13 L18 7"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="7" cy="17" r="1.7" fill="#22c55e" />
+      <circle cx="18" cy="7" r="1.7" fill="#ef4444" />
+    </svg>
+  );
+}
+
+function GuideIcon({ className = "h-6 w-6" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden>
+      <path
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M6 18 C6 12 10 10 12 6 C14 10 18 12 18 18"
+      />
+      <circle cx="12" cy="19" r="1.6" fill="currentColor" />
+    </svg>
+  );
+}
 
 function SpeakerIcon({ muted, className = "h-8 w-8" }: { muted: boolean; className?: string }) {
   if (muted) {
@@ -41,175 +93,101 @@ function SpeakerIcon({ muted, className = "h-8 w-8" }: { muted: boolean; classNa
   );
 }
 
-function NavigationCompass({ heading }: { heading: number | null }) {
-  const ringRotation = heading == null ? 0 : -heading;
-
-  return (
-    <div
-      className="relative flex h-full max-h-36 w-full max-w-36 items-center justify-center rounded-full border-2 border-white/20 bg-black/55 shadow-lg backdrop-blur-md"
-      aria-label={
-        heading == null
-          ? "Brújula, orientación desconocida"
-          : `Orientación ${Math.round(heading)} grados`
-      }
-    >
-      {/* Exterior: gira para alinear N/E/S/O con el mundo real */}
-      <div
-        className="absolute inset-0"
-        style={{ transform: `rotate(${ringRotation}deg)` }}
-        aria-hidden
-      >
-        <span className="absolute left-1/2 top-1.5 -translate-x-1/2 text-lg font-bold text-red-400">
-          N
-        </span>
-        <span className="absolute bottom-1.5 left-1/2 -translate-x-1/2 text-sm font-semibold text-white">
-          S
-        </span>
-        <span className="absolute left-2 top-1/2 -translate-y-1/2 text-sm font-semibold text-white">
-          O
-        </span>
-        <span className="absolute right-2 top-1/2 -translate-y-1/2 text-sm font-semibold text-white">
-          E
-        </span>
-      </div>
-
-      {/* Flecha fija hacia arriba = dirección de avance */}
-      <svg
-        viewBox="0 0 48 56"
-        className="relative z-10 h-[78%] w-[78%]"
-        aria-hidden
-      >
-        <path
-          d="M24 4 L34 46 L24 38 L14 46 Z"
-          fill="#38bdf8"
-          stroke="#7dd3fc"
-          strokeWidth="1.4"
-          strokeLinejoin="round"
-        />
-        <circle cx="24" cy="30" r="3.5" fill="#e2e8f0" />
-      </svg>
-    </div>
-  );
-}
-
-function RoutePreviewExpanded({
-  live,
-  onClose,
-}: {
-  live: NavigationLiveState;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 px-6 backdrop-blur-sm"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Vista ampliada de la ruta"
-      onClick={onClose}
-    >
-      <button
-        type="button"
-        onClick={(e) => {
-          e.stopPropagation();
-          onClose();
-        }}
-        className="absolute right-4 top-[max(0.5rem,env(safe-area-inset-top))] flex h-12 w-12 items-center justify-center rounded-full border border-white/25 bg-black/60 text-2xl text-white active:bg-black/80"
-        aria-label="Cerrar vista ampliada"
-      >
-        ×
-      </button>
-      <div className="w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-        <NavigationRoutePreview
-          fullPath={live.fullPath}
-          remainingPath={live.remainingPath}
-          visiblePath={live.visiblePath}
-          destination={live.destination}
-          position={live.position}
-          large
-          className="w-full max-w-lg"
-        />
-        <p className="mt-4 text-center text-sm text-white/50">
-          Izquierda: ruta total · Derecha: lo visible en navegación (norte arriba)
-        </p>
-      </div>
-    </div>
-  );
-}
-
 export function NavigationTopPanel({
-  live,
   destinationLabel,
   onBack,
 }: {
-  live: NavigationLiveState;
   destinationLabel: string;
   onBack: () => void;
 }) {
-  const [routePreviewOpen, setRoutePreviewOpen] = useState(false);
-
   return (
-    <>
-      <header className="flex h-full min-h-0 flex-col border-b border-white/10 bg-slate-950 px-3 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
-        <div className="flex min-h-0 flex-1 items-stretch gap-2">
-          <button
-            type="button"
-            onClick={() => setRoutePreviewOpen(true)}
-            aria-label="Ampliar vistas de la ruta"
-            className="flex min-h-0 flex-[1.1] flex-col gap-1 active:scale-[0.98]"
-          >
-            <span className="shrink-0 text-[9px] font-medium uppercase tracking-wide text-white/40">
-              Total
-            </span>
-            <NavigationFullRoutePreview
-              fullPath={live.fullPath}
-              destination={live.destination}
-              className="min-h-0 flex-1"
-            />
-          </button>
-          <button
-            type="button"
-            onClick={() => setRoutePreviewOpen(true)}
-            aria-label="Ampliar vista norte del tramo visible"
-            className="flex min-h-0 flex-[1.1] flex-col gap-1 active:scale-[0.98]"
-          >
-            <span className="shrink-0 text-[9px] font-medium uppercase tracking-wide text-white/40">
-              Visible (N)
-            </span>
-            <NavigationVisibleNorthPreview
-              visiblePath={live.visiblePath}
-              remainingPath={live.remainingPath}
-              destination={live.destination}
-              position={live.position}
-              className="min-h-0 flex-1"
-            />
-          </button>
-          <div className="flex min-h-0 flex-1 items-center justify-center">
-            <NavigationCompass heading={live.heading} />
-          </div>
-        </div>
+    <header className="flex h-full min-h-0 flex-col justify-end border-b border-white/10 bg-slate-950 px-3 pb-2 pt-[max(0.5rem,env(safe-area-inset-top))]">
+      <div className="flex shrink-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={onBack}
+          aria-label="Volver al mapa"
+          className="flex h-10 items-center justify-center rounded-full border border-white/20 bg-white/10 px-3 text-sm font-semibold text-white active:bg-white/20"
+        >
+          ← Mapa
+        </button>
+        <p className="min-w-0 flex-1 truncate text-xs text-white/50">
+          {destinationLabel}
+        </p>
+      </div>
+    </header>
+  );
+}
 
-        <div className="mt-2 flex shrink-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={onBack}
-            aria-label="Volver al mapa"
-            className="flex h-10 items-center justify-center rounded-full border border-white/20 bg-white/10 px-3 text-sm font-semibold text-white active:bg-white/20"
-          >
-            ← Mapa
-          </button>
-          <p className="min-w-0 flex-1 truncate text-xs text-white/50">
-            {destinationLabel}
-          </p>
+export function NavigationMiddleOverlay({
+  live,
+  mode,
+  onModeChange,
+}: {
+  live: NavigationLiveState;
+  mode: NavigationDisplayMode;
+  onModeChange: (mode: NavigationDisplayMode) => void;
+}) {
+  return (
+    <div className="pointer-events-none absolute inset-0 z-20">
+      {mode === "guide" && (
+        <div className="absolute inset-0 bg-slate-950">
+          <NavigationHeadingGuidePreview
+            visiblePath={live.visiblePath}
+            remainingPath={live.remainingPath}
+            exitPaths={live.exitPaths}
+            position={live.position}
+            heading={live.heading}
+            className="h-full w-full"
+          />
         </div>
-      </header>
-
-      {routePreviewOpen && (
-        <RoutePreviewExpanded
-          live={live}
-          onClose={() => setRoutePreviewOpen(false)}
-        />
       )}
-    </>
+
+      <div className="pointer-events-auto absolute right-2 top-1/2 flex -translate-y-1/2 flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => onModeChange("aerial")}
+          aria-label="Vista aérea"
+          aria-pressed={mode === "aerial"}
+          className={`flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-2xl border text-[10px] font-semibold shadow-lg backdrop-blur-md active:scale-[0.97] ${
+            mode === "aerial"
+              ? "border-sky-400/60 bg-sky-600 text-white"
+              : "border-white/25 bg-black/70 text-white/75"
+          }`}
+        >
+          <AerialIcon className="h-5 w-5" />
+          <span>Aérea</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onModeChange("overview")}
+          aria-label="Vista ruta completa al norte"
+          aria-pressed={mode === "overview"}
+          className={`flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-2xl border text-[10px] font-semibold shadow-lg backdrop-blur-md active:scale-[0.97] ${
+            mode === "overview"
+              ? "border-sky-400/60 bg-sky-600 text-white"
+              : "border-white/25 bg-black/70 text-white/75"
+          }`}
+        >
+          <OverviewIcon className="h-5 w-5" />
+          <span>Ruta</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => onModeChange("guide")}
+          aria-label="Vista guía"
+          aria-pressed={mode === "guide"}
+          className={`flex h-14 w-14 flex-col items-center justify-center gap-0.5 rounded-2xl border text-[10px] font-semibold shadow-lg backdrop-blur-md active:scale-[0.97] ${
+            mode === "guide"
+              ? "border-sky-400/60 bg-sky-600 text-white"
+              : "border-white/25 bg-black/70 text-white/75"
+          }`}
+        >
+          <GuideIcon className="h-5 w-5" />
+          <span>Guía</span>
+        </button>
+      </div>
+    </div>
   );
 }
 

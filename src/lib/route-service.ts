@@ -7,6 +7,10 @@ import {
   toPathPoint,
   type PathPoint,
 } from "@/lib/route-geo";
+import {
+  buildExitStubsFromAlternatives,
+  buildSyntheticExitStubs,
+} from "@/lib/route-exits";
 import type { Mode, Route } from "@/lib/route-types";
 
 export type NavStep = {
@@ -23,6 +27,8 @@ export type RouteData = {
   cumDist: number[];
   totalMeters: number;
   steps: NavStep[];
+  /** Short stubs for exits you should not take (first ~500 m). */
+  exitStubs: PathPoint[][];
 };
 
 export type RouteRenderHandle = {
@@ -98,6 +104,7 @@ export async function fetchRouteData(
   // routingPreference is only valid for DRIVE; it breaks walking/bike/transit.
   if (route.mode === "DRIVING") {
     request.routingPreference = "TRAFFIC_UNAWARE";
+    request.computeAlternativeRoutes = true;
   }
 
   const { routes } = await RouteClass.computeRoutes(request);
@@ -110,13 +117,25 @@ export async function fetchRouteData(
 
   const cumDist = buildCumulativeDistances(path);
   const totalMeters = cumDist[cumDist.length - 1] ?? 0;
+  const steps = buildNavSteps(googleRoute);
+
+  const alternatives = (routes ?? [])
+    .slice(1)
+    .map((r) => r.path?.map(toPathPoint) ?? [])
+    .filter((p) => p.length >= 2);
+
+  // Prefer real OSM exits when available; keep Google alternatives + synthetic as fallback.
+  const fromAlts = buildExitStubsFromAlternatives(path, cumDist, alternatives);
+  const synthetic = buildSyntheticExitStubs(path, cumDist, steps);
+  const exitStubs = [...fromAlts, ...synthetic];
 
   return {
     googleRoute,
     path,
     cumDist,
     totalMeters,
-    steps: buildNavSteps(googleRoute),
+    steps,
+    exitStubs,
   };
 }
 

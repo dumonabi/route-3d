@@ -209,6 +209,112 @@ export function NavigationVisibleNorthPreview({
   );
 }
 
+/**
+ * Route guide like the top “Visible” panel, but heading-up:
+ * your travel direction is always toward the top of the screen (no map tiles).
+ */
+export function NavigationHeadingGuidePreview({
+  visiblePath,
+  remainingPath,
+  exitPaths = [],
+  position,
+  heading,
+  className = "",
+}: {
+  visiblePath: PathPoint[];
+  remainingPath: PathPoint[];
+  exitPaths?: PathPoint[][];
+  position: PathPoint | null;
+  heading: number | null;
+  className?: string;
+}) {
+  const frame =
+    visiblePath.length >= 2
+      ? visiblePath
+      : remainingPath.length >= 2
+        ? remainingPath
+        : [];
+
+  if (frame.length < 2 || !position) {
+    return emptyPlaceholder(className, "Guía");
+  }
+
+  const headingRad = ((heading ?? 0) * Math.PI) / 180;
+  const cos = Math.cos(headingRad);
+  const sin = Math.sin(headingRad);
+
+  const toHeadingLocal = (p: PathPoint) => {
+    const { x: east, y: north } = toLocalMeters(position, p);
+    return {
+      x: east * cos - north * sin,
+      y: east * sin + north * cos,
+    };
+  };
+
+  const guidePath =
+    visiblePath.length >= 2
+      ? visiblePath
+      : remainingPath.length >= 2
+        ? remainingPath
+        : [];
+  const guideLocal = guidePath.map(toHeadingLocal);
+  const exitLocals = exitPaths.map((exit) => exit.map(toHeadingLocal));
+  const youLocal = { x: 0, y: 0 };
+
+  const bboxPoints = [
+    ...guideLocal,
+    youLocal,
+    ...exitLocals.flat(),
+  ];
+  const { size, project, toLine } = projectBBox(position, bboxPoints, 0.35, 80);
+  const you = project(youLocal);
+
+  return (
+    <svg
+      viewBox={`0 0 ${size} ${size}`}
+      preserveAspectRatio="xMidYMid meet"
+      className={`h-full w-full bg-slate-950 ${className}`}
+      aria-label="Guía de ruta orientada a tu dirección"
+      role="img"
+    >
+      <rect width={size} height={size} fill="#0b1220" />
+
+      {exitLocals.map((exit, i) =>
+        exit.length >= 2 ? (
+          <polyline
+            key={`exit-${i}`}
+            points={toLine(exit)}
+            fill="none"
+            stroke="#cbd5e1"
+            strokeOpacity={0.55}
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        ) : null,
+      )}
+
+      {guideLocal.length >= 2 && (
+        <polyline
+          points={toLine(guideLocal)}
+          fill="none"
+          stroke="#38bdf8"
+          strokeWidth={5.5}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
+
+      <path
+        d={`M ${you.x} ${you.y - 6} L ${you.x + 5} ${you.y + 5} L ${you.x} ${you.y + 2.5} L ${you.x - 5} ${you.y + 5} Z`}
+        fill="#22c55e"
+        stroke="#bbf7d0"
+        strokeWidth={0.8}
+      />
+    </svg>
+  );
+}
+
 /** Combined preview for expanded modal. */
 export function NavigationRoutePreview({
   fullPath,

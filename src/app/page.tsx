@@ -26,12 +26,15 @@ import {
   slicePathToMaxMeters,
   sliceRemainingPath,
 } from "@/lib/route-geo";
+import { filterExitsAhead } from "@/lib/route-exits";
+import { fetchOsmExitStubs } from "@/lib/osm-exits";
 import {
   clampDeltaMs,
   hasMovedMeters,
   smoothPoint,
 } from "@/lib/smooth-motion";
-import { NavigationBottomPanel, NavigationTopPanel } from "@/components/NavigationScreen";
+import { NavigationBottomPanel, NavigationMiddleOverlay, NavigationTopPanel } from "@/components/NavigationScreen";
+import type { NavigationDisplayMode } from "@/components/NavigationScreen";
 import {
   LocationTracker,
   peekLastKnownLocation,
@@ -744,6 +747,7 @@ function Map3D({
   apiKey,
   route,
   view,
+  displayMode = "aerial",
   onStatusChange,
   onGuidanceChange,
   onLiveStateChange,
@@ -752,6 +756,7 @@ function Map3D({
   apiKey: string;
   route: Route;
   view: "map" | "navigation";
+  displayMode?: NavigationDisplayMode;
   onStatusChange: (status: MapStatus) => void;
   onGuidanceChange: (guidance: NavigationGuidance | null) => void;
   onLiveStateChange: (state: NavigationLiveState) => void;
@@ -774,6 +779,8 @@ function Map3D({
   const [routeData, setRouteData] = useState<RouteData | null>(null);
   const viewRef = useRef(view);
   viewRef.current = view;
+  const displayModeRef = useRef(displayMode);
+  displayModeRef.current = displayMode;
   const routeDataRef = useRef<RouteData | null>(null);
   routeDataRef.current = routeData;
   const headingRef = useRef<number | null>(null);
@@ -784,6 +791,12 @@ function Map3D({
   const lastFrameAtRef = useRef(0);
   const mapSteadyRef = useRef(true);
   const lastRouteVisualRef = useRef<PathPoint | null>(null);
+  const osmExitsRef = useRef<PathPoint[][]>([]);
+  const osmFetchAtRef = useRef(0);
+  const osmFetchPosRef = useRef<PathPoint | null>(null);
+  const osmFetchGenRef = useRef(0);
+  const lastOverviewFitAtRef = useRef(0);
+  const lastOverviewFitPosRef = useRef<PathPoint | null>(null);
 
   const applyNorthUp = useCallback(() => {
     if (mapRef.current) {
@@ -805,6 +818,7 @@ function Map3D({
           fullPath: [],
           remainingPath: position ? [position, dest] : [],
           visiblePath: position ? [position, dest] : [],
+          exitPaths: [],
           destination: dest,
         });
         return;
@@ -821,6 +835,13 @@ function Map3D({
         remaining,
         NAVIGATION_VISIBLE_ROUTE_M,
       );
+      const osmExits = osmExitsRef.current;
+      const exitPaths = filterExitsAhead(
+        // Prefer real OSM-connected exits when available; otherwise fallback stubs.
+        osmExits.length > 0 ? osmExits : (data.exitStubs ?? []),
+        remaining,
+        NAVIGATION_VISIBLE_ROUTE_M,
+      );
 
       let heading = headingRef.current;
       if (heading == null && remaining.length >= 2) {
@@ -833,11 +854,41 @@ function Map3D({
         fullPath: data.path,
         remainingPath: remaining,
         visiblePath: visible,
+        exitPaths,
         destination: dest,
       });
     },
     [route.destination.lat, route.destination.lng],
   );
+
+  const refreshOsmExits = useCallback(
+    (corridor: PathPoint[], force = false) => {
+      if (corridor.length < 2) return;
+      const now = Date.now();
+      const lastPos = osmFetchPosRef.current;
+      const movedFar =
+        !lastPos || hasMovedMeters(lastPos, corridor[0]!, 140);
+      if (!force && !movedFar && now - osmFetchAtRef.current < 12_000) {
+        return;
+      }
+
+      osmFetchAtRef.current = now;
+      osmFetchPosRef.current = corridor[0]!;
+      const gen = ++osmFetchGenRef.current;
+
+      void fetchOsmExitStubs(corridor).then((stubs) => {
+        if (gen !== osmFetchGenRef.current) return;
+        osmExitsRef.current = stubs;
+        const pos = lastPositionRef.current ?? displayRef.current;
+        if (viewRef.current === "navigation" && pos) {
+          emitLiveState(pos);
+        }
+      });
+    },
+    [emitLiveState],
+  );
+  const refreshOsmExitsRef = useRef(refreshOsmExits);
+  refreshOsmExitsRef.current = refreshOsmExits;
 
   const updateHeading = useCallback((sample: LocationSample) => {
     const point = sample.point;
@@ -956,12 +1007,35 @@ function Map3D({
             nearest.distanceAlong,
             nearest.point,
           );
-          applyNavigationCamera(
-            map,
-            next,
+          const visible = slicePathToMaxMeters(
             remaining,
-            headingRef.current,
+            NAVIGATION_VISIBLE_ROUTE_M,
           );
+          refreshOsmExitsRef.current(visible);
+          if (displayModeRef.current === "aerial") {
+            applyNavigationCamera(
+              map,
+              next,
+              remaining,
+              headingRef.current,
+            );
+          } else if (displayModeRef.current === "overview") {
+            const movedFar =
+              !lastOverviewFitPosRef.current ||
+              hasMovedMeters(lastOverviewFitPosRef.current, next, 180);
+            if (
+              movedFar ||
+              now - lastOverviewFitAtRef.current > 20_000
+            ) {
+              const dest = {
+                lat: route.destination.lat,
+                lng: route.destination.lng,
+              };
+              flyToRemainingRouteView(map, next, dest, remaining);
+              lastOverviewFitAtRef.current = now;
+              lastOverviewFitPosRef.current = next;
+            }
+          }
         }
       }
     };
@@ -1165,10 +1239,17 @@ function Map3D({
           nearest.distanceAlong,
           nearest.point,
         );
+        const visible = slicePathToMaxMeters(
+          remaining,
+          NAVIGATION_VISIBLE_ROUTE_M,
+        );
+        refreshOsmExits(visible, true);
         flyToNavigationView(map, p, remaining, headingRef.current);
       }
       return () => {
         stopNavigation();
+        osmExitsRef.current = [];
+        osmFetchGenRef.current += 1;
         const mapOnExit = mapRef.current;
         const data = routeDataRef.current;
         const position = lastPositionRef.current ?? displayRef.current;
@@ -1205,7 +1286,36 @@ function Map3D({
     stopNavigation,
     emitLiveState,
     applyNorthUp,
+    refreshOsmExits,
   ]);
+
+  useEffect(() => {
+    if (view !== "navigation") return;
+    const map = mapRef.current;
+    const p = lastPositionRef.current ?? displayRef.current;
+    const data = routeDataRef.current;
+    if (!map || !p || !data) return;
+
+    const nearest = nearestPointOnPath(p, data.path, data.cumDist);
+    const remaining = sliceRemainingPath(
+      data.path,
+      data.cumDist,
+      nearest.distanceAlong,
+      nearest.point,
+    );
+    const dest = {
+      lat: route.destination.lat,
+      lng: route.destination.lng,
+    };
+
+    if (displayMode === "overview") {
+      flyToRemainingRouteView(map, p, dest, remaining);
+      lastOverviewFitAtRef.current = Date.now();
+      lastOverviewFitPosRef.current = p;
+    } else if (displayMode === "aerial") {
+      flyToNavigationView(map, p, remaining, headingRef.current);
+    }
+  }, [displayMode, view, route.destination.lat, route.destination.lng]);
 
   return (
     <div className="relative h-full w-full">
@@ -1331,12 +1441,14 @@ function MapScreen({
     info: null,
   });
   const [guidance, setGuidance] = useState<NavigationGuidance | null>(null);
+  const [navMode, setNavMode] = useState<NavigationDisplayMode>("aerial");
   const [live, setLive] = useState<NavigationLiveState>(() => ({
     position: null,
     heading: null,
     fullPath: [],
     remainingPath: [],
     visiblePath: [],
+    exitPaths: [],
     destination: {
       lat: route.destination.lat,
       lng: route.destination.lng,
@@ -1347,14 +1459,13 @@ function MapScreen({
     <div
       className={
         view === "navigation"
-          ? "grid h-dvh w-full grid-rows-3 bg-slate-950"
+          ? "grid h-dvh w-full grid-rows-[auto_1fr_1fr] bg-slate-950"
           : "relative h-dvh w-full bg-slate-950"
       }
     >
       {view === "navigation" && (
         <div className="relative z-20 min-h-0">
           <NavigationTopPanel
-            live={live}
             destinationLabel={route.destination.label}
             onBack={() => onViewChange("map")}
           />
@@ -1372,11 +1483,19 @@ function MapScreen({
           apiKey={apiKey}
           route={route}
           view={view}
+          displayMode={navMode}
           onStatusChange={setStatus}
           onGuidanceChange={setGuidance}
           onLiveStateChange={setLive}
           onStartNavigation={() => onViewChange("navigation")}
         />
+        {view === "navigation" && (
+          <NavigationMiddleOverlay
+            live={live}
+            mode={navMode}
+            onModeChange={setNavMode}
+          />
+        )}
       </div>
 
       {view === "navigation" && (
