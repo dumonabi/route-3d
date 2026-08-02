@@ -11,11 +11,9 @@ import {
   applyNavigationCamera,
   earthCameraLimits,
   flyToNavigationView,
-  flyToRemainingRouteView,
   flyToRouteView,
   initialMapRange,
   loadMaps,
-  NAVIGATION_VISIBLE_ROUTE_M,
   preloadMapScene,
   routeCenter,
 } from "@/lib/maps";
@@ -23,25 +21,19 @@ import type { PathPoint } from "@/lib/route-geo";
 import {
   bearingDegrees,
   nearestPointOnPath,
-  slicePathToMaxMeters,
   sliceRemainingPath,
 } from "@/lib/route-geo";
-import { filterExitsAhead } from "@/lib/route-exits";
-import { fetchOsmExitStubs } from "@/lib/osm-exits";
 import {
   clampDeltaMs,
   hasMovedMeters,
   smoothPoint,
 } from "@/lib/smooth-motion";
-import { NavigationBottomPanel, NavigationMiddleOverlay, NavigationTopPanel } from "@/components/NavigationScreen";
-import type { NavigationDisplayMode } from "@/components/NavigationScreen";
 import {
   LocationTracker,
   peekLastKnownLocation,
   rememberLocationPoint,
   type LocationSample,
 } from "@/lib/location-tracker";
-import { RouteNavigation } from "@/lib/route-navigation";
 import {
   renderRouteOnMap,
   type RouteData,
@@ -54,13 +46,11 @@ import {
 import type {
   MapStatus,
   Mode,
-  NavigationGuidance,
-  NavigationLiveState,
   Place,
   Route,
 } from "@/lib/route-types";
 
-type Screen = "form" | "map" | "navigation";
+type Screen = "form" | "map";
 
 function routeKey(route: Route): string {
   return `${route.origin.lat},${route.origin.lng}|${route.destination.lat},${route.destination.lng}|${route.mode}`;
@@ -624,40 +614,6 @@ function TiltBackIcon() {
 }
 
 
-function NavigationIcon({ className = "h-6 w-6" }: { className?: string }) {
-  return (
-    <svg viewBox="0 0 24 24" className={className} aria-hidden>
-      <path
-        fill="currentColor"
-        d="M12 2 L19 19 L12 15 L5 19 Z"
-        opacity="0.9"
-      />
-    </svg>
-  );
-}
-
-function NavLaunchButton({
-  enabled,
-  onClick,
-}: {
-  enabled: boolean;
-  onClick: () => void;
-}) {
-  if (!enabled) return null;
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label="Iniciar navegación"
-      className="pointer-events-auto flex h-12 min-w-12 items-center justify-center gap-2 rounded-full border border-white/25 bg-black/75 px-4 text-sm font-semibold text-white shadow-lg backdrop-blur-md active:scale-[0.98] active:bg-black/90"
-    >
-      <NavigationIcon />
-      <span>Navegar</span>
-    </button>
-  );
-}
-
 function CameraPills({
   mapRef,
 }: {
@@ -743,46 +699,26 @@ function CameraPills({
   );
 }
 
+
 function Map3D({
   apiKey,
   route,
-  view,
-  displayMode = "aerial",
   onStatusChange,
-  onGuidanceChange,
-  onLiveStateChange,
-  onStartNavigation,
 }: {
   apiKey: string;
   route: Route;
-  view: "map" | "navigation";
-  displayMode?: NavigationDisplayMode;
   onStatusChange: (status: MapStatus) => void;
-  onGuidanceChange: (guidance: NavigationGuidance | null) => void;
-  onLiveStateChange: (state: NavigationLiveState) => void;
-  onStartNavigation: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.maps3d.Map3DElement | null>(null);
   const routeHandleRef = useRef<RouteRenderHandle | null>(null);
   const locationRef = useRef<UserLocationIndicator | null>(null);
   const lastPositionRef = useRef<PathPoint | null>(null);
-  const navRef = useRef<RouteNavigation | null>(null);
   const trackerRef = useRef<LocationTracker | null>(null);
   const onStatusRef = useRef(onStatusChange);
-  const onGuidanceRef = useRef(onGuidanceChange);
-  const onLiveStateRef = useRef(onLiveStateChange);
   onStatusRef.current = onStatusChange;
-  onGuidanceRef.current = onGuidanceChange;
-  onLiveStateRef.current = onLiveStateChange;
 
-  const [routeData, setRouteData] = useState<RouteData | null>(null);
-  const viewRef = useRef(view);
-  viewRef.current = view;
-  const displayModeRef = useRef(displayMode);
-  displayModeRef.current = displayMode;
   const routeDataRef = useRef<RouteData | null>(null);
-  routeDataRef.current = routeData;
   const headingRef = useRef<number | null>(null);
   const prevHeadingPointRef = useRef<PathPoint | null>(null);
   const targetRef = useRef<PathPoint | null>(null);
@@ -791,104 +727,13 @@ function Map3D({
   const lastFrameAtRef = useRef(0);
   const mapSteadyRef = useRef(true);
   const lastRouteVisualRef = useRef<PathPoint | null>(null);
-  const osmExitsRef = useRef<PathPoint[][]>([]);
-  const osmFetchAtRef = useRef(0);
-  const osmFetchPosRef = useRef<PathPoint | null>(null);
-  const osmFetchGenRef = useRef(0);
-  const lastOverviewFitAtRef = useRef(0);
-  const lastOverviewFitPosRef = useRef<PathPoint | null>(null);
+  const aerialFollow = Boolean(route.originIsCurrentLocation);
 
   const applyNorthUp = useCallback(() => {
     if (mapRef.current) {
       mapRef.current.heading = 0;
     }
   }, []);
-
-  const emitLiveState = useCallback(
-    (position: PathPoint | null) => {
-      const data = routeDataRef.current;
-      const dest = {
-        lat: route.destination.lat,
-        lng: route.destination.lng,
-      };
-      if (!position || !data) {
-        onLiveStateRef.current({
-          position,
-          heading: headingRef.current,
-          fullPath: [],
-          remainingPath: position ? [position, dest] : [],
-          visiblePath: position ? [position, dest] : [],
-          exitPaths: [],
-          destination: dest,
-        });
-        return;
-      }
-
-      const nearest = nearestPointOnPath(position, data.path, data.cumDist);
-      const remaining = sliceRemainingPath(
-        data.path,
-        data.cumDist,
-        nearest.distanceAlong,
-        nearest.point,
-      );
-      const visible = slicePathToMaxMeters(
-        remaining,
-        NAVIGATION_VISIBLE_ROUTE_M,
-      );
-      const osmExits = osmExitsRef.current;
-      const exitPaths = filterExitsAhead(
-        // Prefer real OSM-connected exits when available; otherwise fallback stubs.
-        osmExits.length > 0 ? osmExits : (data.exitStubs ?? []),
-        remaining,
-        NAVIGATION_VISIBLE_ROUTE_M,
-      );
-
-      let heading = headingRef.current;
-      if (heading == null && remaining.length >= 2) {
-        heading = bearingDegrees(remaining[0]!, remaining[1]!);
-      }
-
-      onLiveStateRef.current({
-        position,
-        heading,
-        fullPath: data.path,
-        remainingPath: remaining,
-        visiblePath: visible,
-        exitPaths,
-        destination: dest,
-      });
-    },
-    [route.destination.lat, route.destination.lng],
-  );
-
-  const refreshOsmExits = useCallback(
-    (corridor: PathPoint[], force = false) => {
-      if (corridor.length < 2) return;
-      const now = Date.now();
-      const lastPos = osmFetchPosRef.current;
-      const movedFar =
-        !lastPos || hasMovedMeters(lastPos, corridor[0]!, 140);
-      if (!force && !movedFar && now - osmFetchAtRef.current < 12_000) {
-        return;
-      }
-
-      osmFetchAtRef.current = now;
-      osmFetchPosRef.current = corridor[0]!;
-      const gen = ++osmFetchGenRef.current;
-
-      void fetchOsmExitStubs(corridor).then((stubs) => {
-        if (gen !== osmFetchGenRef.current) return;
-        osmExitsRef.current = stubs;
-        const pos = lastPositionRef.current ?? displayRef.current;
-        if (viewRef.current === "navigation" && pos) {
-          emitLiveState(pos);
-        }
-      });
-    },
-    [emitLiveState],
-  );
-  const refreshOsmExitsRef = useRef(refreshOsmExits);
-  refreshOsmExitsRef.current = refreshOsmExits;
 
   const updateHeading = useCallback((sample: LocationSample) => {
     const point = sample.point;
@@ -903,38 +748,16 @@ function Map3D({
     prevHeadingPointRef.current = point;
   }, []);
 
-  const rerouteFrom = useCallback(
-    async (origin: PathPoint) => {
-      const map = mapRef.current;
-      if (!map) throw new Error("Map not ready");
-      routeHandleRef.current?.remove();
-      const { handle, data } = await renderRouteOnMap(map, route, origin, {
-        showOriginMarker: !route.originIsCurrentLocation,
-      });
-      routeHandleRef.current = handle;
-      setRouteData(data);
-      routeDataRef.current = data;
-      lastPositionRef.current = origin;
-      locationRef.current?.tick(origin, mapRef.current?.range ?? null);
-      locationRef.current?.bringToFront();
-      handle.updateRemainingPath(origin);
-      navRef.current?.updateRouteData(data);
-      return data;
+  const handleLivePosition = useCallback(
+    (sample: LocationSample) => {
+      const point = sample.point;
+      lastPositionRef.current = point;
+      targetRef.current = point;
+      if (!displayRef.current) displayRef.current = point;
+      updateHeading(sample);
     },
-    [route],
+    [updateHeading],
   );
-
-  const handleLivePosition = useCallback((sample: LocationSample) => {
-    const point = sample.point;
-    lastPositionRef.current = point;
-    targetRef.current = point;
-    if (!displayRef.current) displayRef.current = point;
-    updateHeading(sample);
-    if (viewRef.current === "navigation") {
-      emitLiveState(point);
-    }
-    navRef.current?.handlePosition(point);
-  }, [emitLiveState, updateHeading]);
 
   useEffect(() => {
     const el = host.current;
@@ -950,8 +773,6 @@ function Map3D({
       error: null,
       info: null,
     });
-    onGuidanceRef.current(null);
-    setRouteData(null);
 
     const stopTracker = () => {
       trackerRef.current?.stop();
@@ -966,10 +787,10 @@ function Map3D({
     };
 
     const animateLive = (now: number) => {
-      const map = mapRef.current;
+      const mapEl = mapRef.current;
       const target = targetRef.current;
       const display = displayRef.current;
-      if (!map || !target || !display) return;
+      if (!mapEl || !target || !display) return;
 
       const dt = clampDeltaMs(
         lastFrameAtRef.current ? now - lastFrameAtRef.current : 16,
@@ -980,24 +801,20 @@ function Map3D({
       displayRef.current = next;
 
       const interacting = !mapSteadyRef.current;
-      locationRef.current?.tick(next, map.range ?? null, { light: interacting });
+      locationRef.current?.tick(next, mapEl.range ?? null, { light: interacting });
 
       if (
         routeHandleRef.current &&
         (!interacting ||
           hasMovedMeters(lastRouteVisualRef.current ?? next, next, 8))
       ) {
-        const trimThreshold = viewRef.current === "navigation" ? 0.8 : 1.5;
-        if (
-          hasMovedMeters(lastRouteVisualRef.current ?? next, next, trimThreshold)
-        ) {
+        if (hasMovedMeters(lastRouteVisualRef.current ?? next, next, 1.5)) {
           routeHandleRef.current.updateRemainingPath(next);
           lastRouteVisualRef.current = next;
         }
       }
 
-      if (viewRef.current === "navigation") {
-        emitLiveState(next);
+      if (aerialFollow) {
         const data = routeDataRef.current;
         if (data) {
           const nearest = nearestPointOnPath(next, data.path, data.cumDist);
@@ -1007,35 +824,11 @@ function Map3D({
             nearest.distanceAlong,
             nearest.point,
           );
-          const visible = slicePathToMaxMeters(
-            remaining,
-            NAVIGATION_VISIBLE_ROUTE_M,
-          );
-          refreshOsmExitsRef.current(visible);
-          if (displayModeRef.current === "aerial") {
-            applyNavigationCamera(
-              map,
-              next,
-              remaining,
-              headingRef.current,
-            );
-          } else if (displayModeRef.current === "overview") {
-            const movedFar =
-              !lastOverviewFitPosRef.current ||
-              hasMovedMeters(lastOverviewFitPosRef.current, next, 180);
-            if (
-              movedFar ||
-              now - lastOverviewFitAtRef.current > 20_000
-            ) {
-              const dest = {
-                lat: route.destination.lat,
-                lng: route.destination.lng,
-              };
-              flyToRemainingRouteView(map, next, dest, remaining);
-              lastOverviewFitAtRef.current = now;
-              lastOverviewFitPosRef.current = next;
-            }
+          let heading = headingRef.current;
+          if (heading == null && remaining.length >= 2) {
+            heading = bearingDegrees(remaining[0]!, remaining[1]!);
           }
+          applyNavigationCamera(mapEl, next, remaining, heading);
         }
       }
     };
@@ -1058,14 +851,12 @@ function Map3D({
       const tracker = new LocationTracker();
       trackerRef.current = tracker;
       tracker.start(handleLivePosition, (message) => {
-        if (viewRef.current !== "navigation") return;
         if (peekLastKnownLocation()) return;
-        onGuidanceRef.current({
-          instruction: message,
-          distanceText: null,
-          maneuver: null,
-          rerouting: false,
-          remainingText: null,
+        onStatusRef.current({
+          loading: false,
+          phase: null,
+          error: message,
+          info: null,
         });
       });
     };
@@ -1107,39 +898,45 @@ function Map3D({
         }
 
         routeHandleRef.current = handle;
-        setRouteData(data);
         routeDataRef.current = data;
-
         if (route.originIsCurrentLocation) {
-          handle.updateRemainingPath(
-            lastPositionRef.current ?? origin,
-          );
+          handle.updateRemainingPath(lastPositionRef.current ?? origin);
           locationRef.current?.bringToFront();
           startTracker();
           startAnimation();
+          const p = lastPositionRef.current ?? origin;
+          const nearest = nearestPointOnPath(p, data.path, data.cumDist);
+          const remaining = sliceRemainingPath(
+            data.path,
+            data.cumDist,
+            nearest.distanceAlong,
+            nearest.point,
+          );
+          flyToNavigationView(mapEl, p, remaining, headingRef.current);
+        } else {
+          flyToRouteView(mapEl, route, { path: data.path });
+          applyNorthUp();
         }
-
-        if (mapEl) flyToRouteView(mapEl, route, { path: data.path });
-        applyNorthUp();
 
         const localized = data.googleRoute.localizedValues;
         onStatusRef.current({
           loading: false,
           phase: null,
           error: null,
-          info: localized?.distance && localized?.duration
-            ? {
-                distance: localized.distance,
-                duration: localized.duration,
-              }
-            : {
-                distance: data.googleRoute.distanceMeters
-                  ? `${Math.round(data.googleRoute.distanceMeters / 1000)} km`
-                  : "—",
-                duration: data.googleRoute.durationMillis
-                  ? `${Math.round(data.googleRoute.durationMillis / 60_000)} min`
-                  : "—",
-              },
+          info:
+            localized?.distance && localized?.duration
+              ? {
+                  distance: localized.distance,
+                  duration: localized.duration,
+                }
+              : {
+                  distance: data.googleRoute.distanceMeters
+                    ? `${Math.round(data.googleRoute.distanceMeters / 1000)} km`
+                    : "—",
+                  duration: data.googleRoute.durationMillis
+                    ? `${Math.round(data.googleRoute.durationMillis / 60_000)} min`
+                    : "—",
+                },
         });
       } catch {
         if (!dead) {
@@ -1170,7 +967,7 @@ function Map3D({
       map = new Map3DElement({
         center: routeCenter(route),
         range: initialMapRange(route),
-        tilt: 35,
+        tilt: aerialFollow ? 30 : 35,
         heading: 0,
         mode: MapMode.SATELLITE,
         defaultUIHidden: true,
@@ -1193,8 +990,6 @@ function Map3D({
       dead = true;
       stopTracker();
       stopAnimation();
-      navRef.current?.dispose();
-      navRef.current = null;
       map?.removeEventListener("gmp-steadychange", onSteady);
       routeHandleRef.current?.remove();
       routeHandleRef.current = null;
@@ -1204,131 +999,14 @@ function Map3D({
       map?.remove();
       el.replaceChildren();
     };
-  }, [apiKey, applyNorthUp, handleLivePosition, route]);
-
-  const startNavigation = useCallback(() => {
-    if (!route.originIsCurrentLocation || !routeData) return;
-    navRef.current?.dispose();
-    const nav = new RouteNavigation({
-      route,
-      data: routeData,
-      onGuidance: onGuidanceChange,
-      onReroute: rerouteFrom,
-    });
-    navRef.current = nav;
-    nav.start(lastPositionRef.current ?? undefined);
-  }, [onGuidanceChange, rerouteFrom, route, routeData]);
-
-  const stopNavigation = useCallback(() => {
-    navRef.current?.dispose();
-    navRef.current = null;
-    onGuidanceChange(null);
-  }, [onGuidanceChange]);
-
-  useEffect(() => {
-    if (view === "navigation" && routeData) {
-      startNavigation();
-      const map = mapRef.current;
-      const p = lastPositionRef.current;
-      emitLiveState(p);
-      if (map && p) {
-        const nearest = nearestPointOnPath(p, routeData.path, routeData.cumDist);
-        const remaining = sliceRemainingPath(
-          routeData.path,
-          routeData.cumDist,
-          nearest.distanceAlong,
-          nearest.point,
-        );
-        const visible = slicePathToMaxMeters(
-          remaining,
-          NAVIGATION_VISIBLE_ROUTE_M,
-        );
-        refreshOsmExits(visible, true);
-        flyToNavigationView(map, p, remaining, headingRef.current);
-      }
-      return () => {
-        stopNavigation();
-        osmExitsRef.current = [];
-        osmFetchGenRef.current += 1;
-        const mapOnExit = mapRef.current;
-        const data = routeDataRef.current;
-        const position = lastPositionRef.current ?? displayRef.current;
-        if (!mapOnExit || !data || !position) return;
-
-        const dest = {
-          lat: route.destination.lat,
-          lng: route.destination.lng,
-        };
-        const nearest = nearestPointOnPath(
-          position,
-          data.path,
-          data.cumDist,
-        );
-        const remaining = sliceRemainingPath(
-          data.path,
-          data.cumDist,
-          nearest.distanceAlong,
-          nearest.point,
-        );
-
-        routeHandleRef.current?.updateRemainingPath(position);
-        applyNorthUp();
-        flyToRemainingRouteView(mapOnExit, position, dest, remaining);
-      };
-    }
-    stopNavigation();
-  }, [
-    view,
-    routeData,
-    route.destination.lat,
-    route.destination.lng,
-    startNavigation,
-    stopNavigation,
-    emitLiveState,
-    applyNorthUp,
-    refreshOsmExits,
-  ]);
-
-  useEffect(() => {
-    if (view !== "navigation") return;
-    const map = mapRef.current;
-    const p = lastPositionRef.current ?? displayRef.current;
-    const data = routeDataRef.current;
-    if (!map || !p || !data) return;
-
-    const nearest = nearestPointOnPath(p, data.path, data.cumDist);
-    const remaining = sliceRemainingPath(
-      data.path,
-      data.cumDist,
-      nearest.distanceAlong,
-      nearest.point,
-    );
-    const dest = {
-      lat: route.destination.lat,
-      lng: route.destination.lng,
-    };
-
-    if (displayMode === "overview") {
-      flyToRemainingRouteView(map, p, dest, remaining);
-      lastOverviewFitAtRef.current = Date.now();
-      lastOverviewFitPosRef.current = p;
-    } else if (displayMode === "aerial") {
-      flyToNavigationView(map, p, remaining, headingRef.current);
-    }
-  }, [displayMode, view, route.destination.lat, route.destination.lng]);
+  }, [apiKey, applyNorthUp, aerialFollow, handleLivePosition, route]);
 
   return (
     <div className="relative h-full w-full">
       <div ref={host} className="map-3d-host h-full w-full" />
-      {view === "map" && (
-        <div className="pointer-events-none absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 z-10 flex flex-col items-end gap-2">
-          <NavLaunchButton
-            enabled={Boolean(route.originIsCurrentLocation && routeData)}
-            onClick={onStartNavigation}
-          />
-          <CameraPills mapRef={mapRef} />
-        </div>
-      )}
+      <div className="pointer-events-none absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] right-3 z-10 flex flex-col items-end gap-2">
+        <CameraPills mapRef={mapRef} />
+      </div>
     </div>
   );
 }
@@ -1421,17 +1099,14 @@ function FormScreen({
   );
 }
 
+
 function MapScreen({
   apiKey,
   route,
-  view,
-  onViewChange,
   onBackToForm,
 }: {
   apiKey: string;
   route: Route;
-  view: "map" | "navigation";
-  onViewChange: (view: "map" | "navigation") => void;
   onBackToForm: () => void;
 }) {
   const [status, setStatus] = useState<MapStatus>({
@@ -1440,71 +1115,18 @@ function MapScreen({
     error: null,
     info: null,
   });
-  const [guidance, setGuidance] = useState<NavigationGuidance | null>(null);
-  const [navMode, setNavMode] = useState<NavigationDisplayMode>("aerial");
-  const [live, setLive] = useState<NavigationLiveState>(() => ({
-    position: null,
-    heading: null,
-    fullPath: [],
-    remainingPath: [],
-    visiblePath: [],
-    exitPaths: [],
-    destination: {
-      lat: route.destination.lat,
-      lng: route.destination.lng,
-    },
-  }));
 
   return (
-    <div
-      className={
-        view === "navigation"
-          ? "grid h-dvh w-full grid-rows-[auto_1fr_1fr] bg-slate-950"
-          : "relative h-dvh w-full bg-slate-950"
-      }
-    >
-      {view === "navigation" && (
-        <div className="relative z-20 min-h-0">
-          <NavigationTopPanel
-            destinationLabel={route.destination.label}
-            onBack={() => onViewChange("map")}
-          />
-        </div>
-      )}
-
-      <div
-        className={
-          view === "navigation"
-            ? "relative z-10 min-h-0"
-            : "absolute inset-0"
-        }
-      >
+    <div className="relative h-dvh w-full bg-slate-950">
+      <div className="absolute inset-0">
         <Map3D
           apiKey={apiKey}
           route={route}
-          view={view}
-          displayMode={navMode}
           onStatusChange={setStatus}
-          onGuidanceChange={setGuidance}
-          onLiveStateChange={setLive}
-          onStartNavigation={() => onViewChange("navigation")}
         />
-        {view === "navigation" && (
-          <NavigationMiddleOverlay
-            live={live}
-            mode={navMode}
-            onModeChange={setNavMode}
-          />
-        )}
       </div>
 
-      {view === "navigation" && (
-        <div className="relative z-20 min-h-0">
-          <NavigationBottomPanel guidance={guidance} />
-        </div>
-      )}
-
-      {view === "map" && status.loading && status.phase === "map" && (
+      {status.loading && status.phase === "map" && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-slate-950/50">
           <div className="rounded-2xl border border-white/15 bg-black/70 px-5 py-4 text-sm text-white backdrop-blur-md">
             Cargando mapa 3D...
@@ -1512,35 +1134,31 @@ function MapScreen({
         </div>
       )}
 
-      {view === "map" && (
-        <>
-          <div className="google-banner-reserve-top pointer-events-none absolute inset-x-0 top-0 z-10 p-3">
-            <button
-              type="button"
-              onClick={onBackToForm}
-              aria-label="Atrás"
-              className="pointer-events-auto flex h-14 w-14 items-center justify-center rounded-full border border-sky-300/35 bg-sky-600 text-2xl font-semibold text-white shadow-lg backdrop-blur-md active:scale-[0.97] active:bg-sky-500"
-            >
-              ←
-            </button>
-          </div>
+      <div className="google-banner-reserve-top pointer-events-none absolute inset-x-0 top-0 z-10 p-3">
+        <button
+          type="button"
+          onClick={onBackToForm}
+          aria-label="Atrás"
+          className="pointer-events-auto flex h-14 w-14 items-center justify-center rounded-full border border-sky-300/35 bg-sky-600 text-2xl font-semibold text-white shadow-lg backdrop-blur-md active:scale-[0.97] active:bg-sky-500"
+        >
+          ←
+        </button>
+      </div>
 
-          {status.error && (
-            <p className="pointer-events-none absolute inset-x-3 bottom-[calc(max(0.75rem,env(safe-area-inset-bottom))+3.25rem)] z-10 rounded-xl border border-red-400/30 bg-red-950/80 px-4 py-2 text-center text-sm text-red-200 backdrop-blur-md">
-              {status.error}
-            </p>
-          )}
-
-          <a
-            href={buildMapsUrl(route)}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-3 z-10 flex min-h-11 items-center rounded-full border border-white/20 bg-black/65 px-4 py-2.5 text-sm font-semibold text-white shadow-md backdrop-blur-md active:bg-black/80"
-          >
-            Google Maps
-          </a>
-        </>
+      {status.error && (
+        <p className="pointer-events-none absolute inset-x-3 bottom-[calc(max(0.75rem,env(safe-area-inset-bottom))+3.25rem)] z-10 rounded-xl border border-red-400/30 bg-red-950/80 px-4 py-2 text-center text-sm text-red-200 backdrop-blur-md">
+          {status.error}
+        </p>
       )}
+
+      <a
+        href={buildMapsUrl(route)}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="absolute bottom-[max(0.75rem,env(safe-area-inset-bottom))] left-3 z-10 flex min-h-11 items-center rounded-full border border-white/20 bg-black/65 px-4 py-2.5 text-sm font-semibold text-white shadow-md backdrop-blur-md active:bg-black/80"
+      >
+        Google Maps
+      </a>
     </div>
   );
 }
@@ -1619,8 +1237,6 @@ export default function Page() {
             key={routeKey(route)}
             apiKey={apiKey}
             route={route}
-            view={screen === "navigation" ? "navigation" : "map"}
-            onViewChange={(view) => setScreen(view)}
             onBackToForm={goBackToForm}
           />
         </div>
